@@ -1,0 +1,15 @@
+build/
+out/
+.vs/
+.vscode/
+.idea/
+*.user
+CMakeCache.txt
+CMakeFiles/
+third_party/googletest-1.17.0/
+third_party/*.zip
+third_party/*.jar
+cmake-build-*/
+# Decompiled Mojang code, kept locally for reference only; regenerate with
+# scripts/decompile_reference.ps1
+reference/

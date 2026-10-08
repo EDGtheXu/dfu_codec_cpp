@@ -1,0 +1,6 @@
+add_executable(risk_def_example risk_def_main.cpp)
+target_link_libraries(risk_def_example PRIVATE codec)
+target_include_directories(risk_def_example PRIVATE "${CMAKE_SOURCE_DIR}/models")
+if(MSVC)
+  target_compile_options(risk_def_example PRIVATE /utf-8)
+endif()

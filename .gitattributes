@@ -1,0 +1,5 @@
+* text=auto
+# The vendored nlohmann single header is kept byte-identical to upstream.
+third_party/nlohmann/json.hpp -text
+*.png binary
+*.jar binary
