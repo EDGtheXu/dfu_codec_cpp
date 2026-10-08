@@ -1,10 +1,13 @@
 # 泛化 ops（方案 B）设计记录
 
-状态：**阶段 0（可行性 + 微基准）与阶段 1（ops 层 + codec 层擦除）均已完成**。
-阶段 1 的实测结论：**绝对性能与改动前持平**（2 风险 codec 解码 15 423 ns vs 基线
-15 500 ns），174/174 测试在 Release（MSVC 14.50）与 Debug（MSVC 14.44）下全绿。
+状态：**阶段 0（可行性 + 微基准）、阶段 1（ops 层 + codec 层擦除）、阶段 2（`Dynamic`）、
+阶段 3（第二种格式：TOML）均已完成**。门禁实测：阶段 1 绝对性能与改动前持平
+（2 风险 codec 解码 15 423 ns vs 基线 15 500 ns）；阶段 3 的复测见 §4.3
+（隔离解码指标在**代码布局噪声**内，`unboundedMap` 成功路径的多余分配已修掉），
+验收后按 §4.4 修掉了 TOML 编码的 O(N²)（400 项 248 ms → 4.2 ms，线性）。
+202/202 测试在 Release（MSVC 14.50）与 Debug（MSVC 14.44）下全绿。
 分支：`generic-ops`（`zh-cn` 未受影响）。原型代码在 [`prototype/`](../prototype)：
-**设计实验，不是库的一部分**，阶段 3 接完第二种格式后应删除。
+**设计实验，不是库的一部分**，阶段 4 收尾后应删除。
 
 ## 1. 目标
 
@@ -82,11 +85,15 @@ class Dynamic {
 两处有意偏离：`decode` 把余下的值也包成 `Dynamic` 返回（DFU 返回裸的 `T`）；
 `operator==` 只比较值而不比 ops 身份（ops 是单例，比身份会让"不同实例、同一份数据"永不相等）。
 
-### 3.3 `convertTo` 从恒等变成真转换
+### 3.3 `convertTo` 从恒等变成真转换（**阶段 3 已落地**）
 
-接口里本来就有它（`DynamicOps::convertTo`），`JsonOps` 今天返回原值，
-而内部已有递归调用点（`convertList` / `convertMap`）。泛化之后它就是
-**JSON ↔ TOML 的桥**：由*源* ops 递归遍历自己的 DOM，逐节点调用*目标* ops 的 `createX`。
+接口里本来就有它（`DynamicOps::convertTo`），阶段 1 时 `JsonOps` 还返回原值。
+阶段 3 之后它是**真的转换**：由*源* ops 递归遍历自己的 DOM，逐节点调用*目标* ops 的
+`createX`（`JsonOps::convertNode`，同一 ops 时仍走恒等快路径），`TomlOps` 侧同样实现。
+于是 `Dynamic::convertTo` / `DynamicOps::convertTo` 真正成为格式间的桥，JSON 与 TOML
+可以来回搬运同一棵树（`test/unit/toml_ops_test.cpp` 双向验证）。
+JSON 的 `null` 映射为目标 ops 的 `empty()`：`convertTo` 保持 DFU 的全函数语义，
+拒绝发生在写出前的校验里（例如 `dumpToml`）。
 
 ## 4. 阶段 0：原型与实测
 
@@ -172,6 +179,119 @@ codec 解码 16 422 ns（基线 15 500，+5.9 %），比值 vs 裸 parser 1.344�
 跨格式误用的明确诊断；为了 1~2 % 的比值去换成 24 字节（类型由 ops 自负）不划算。若将来确有需要，
 这条记录就是当时的取舍依据。
 
+### 4.3 阶段 3 的复测：layout 噪声，与一处真实的多余分配
+
+阶段 3 结束时按惯例复测，得到"隔离解码 15 988 ns、比值 1.364"（阶段 2 为 15 270 ns /
+1.245），看起来是 +3.5 % 的回归。为此做了**同源 A/B**：同一份 perf 源码、同一套编译参数，
+只把 `include/codec.hpp` 换成 `81e8b9d`（阶段 2）的版本，两个 exe 交替运行 6 轮：
+
+| 指标 | 阶段 2 头文件 | 阶段 3 头文件 | 差 |
+| --- | ---: | ---: | ---: |
+| `ordered_json::parse`（同样代码！） | 12 079 ns | 11 513 ns | −4.7 % |
+| `codec decode (pre-parsed)` | 15 241 ns | 15 776 ns | +3.5 % |
+| `parse + codec decode` | 27 778 ns | 27 953 ns | +0.6 % |
+| `codec encode + dump` | 29 323 ns | 29 229 ns | −0.3 % |
+
+**纯 parser 在两个 exe 里差了 4.7 %，而它的代码完全一样** —— 说明这个量级是**代码布局**
+（函数地址/对齐）造成的，不是语义差异。于是再加一个对照：给同一个头文件、同一份源码
+**多链一个纯填充 TU**（`build/phase3/ab/noise_tu.cpp`，120 个不被调用的函数），
+四个 exe 交替各跑 5 轮：
+
+| exe | header | 额外填充 TU | decode |
+| --- | --- | --- | ---: |
+| p2 | 阶段 2 | 无 | 15 202 ns |
+| p2_noise | 阶段 2 | 有 | 15 498 ns（**+1.9 %**） |
+| p3 | 阶段 3 | 无 | 15 713 ns |
+| p3_noise | 阶段 3 | 有 | **15 211 ns（−3.2 %，比 p2 还快）** |
+
+四个 exe 的极差 3.36 %。**结论：隔离解码指标的 ±3 % 是布局噪声，阶段 3 没有可测的语义回归**；
+`p3_noise`（带全部阶段 3 代码）反而测出与 `p2` 相同的 15 211 ns。真正稳的是端到端
+`parse + decode`（±0.6 %）。
+
+不过复测查代码时发现一处**真实的**多余流量（本 fixture 碰不到，但任何用 `unboundedMap`
+的用户都会碰到）：阶段 1 的"通用代码里最后一处 JSON 假设"改成了 ops 级询问，写法是把
+键文本**无条件**取出来：
+
+```cpp
+const bool stringKey = ops.isStringKey(entry.first);
+std::string keyText = ...ops.getStringValue(entry.first)...;   // ← 每个条目都拷贝一次
+```
+
+而 `DataResult::addPath(std::string_view)` 在**成功**时是恒等（`isSuccess() ? *this : …`），
+也就是说这次拷贝在正常路径上纯属浪费（每个条目一次 `std::string` + 一个 `DataResult`）。
+改成只在 `key.isError() || value.isError()` 时才问 ops 拿键文本，语义完全等价（错误路径的
+path 逐字不变）。用 `build/phase3/ab/unbounded_bench.cpp`（200 键的 `unboundedMap`）三版本对比：
+
+| 版本 | 200 条目解码（3 次） | ns/条目 |
+| --- | ---: | ---: |
+| 阶段 2（JSON 直连） | 64 900 / 65 000 / 67 800 ns | 324–339 |
+| 阶段 3 首版（无条件取键文本） | 69 600 / 68 000 / 70 000 ns | 340–350（**+20~24 ns/条目**） |
+| 阶段 3 修正后（出错才取） | 63 400 / 62 000 / 62 400 ns | 310–317 |
+
+即首版确实给 `unboundedMap` 成功路径加了 ~5~7 % 的成本，修正后与阶段 2 持平（略优）。
+
+### 4.4 阶段 3 验收后修的第二处真实缺陷：TOML 编码是 O(N²)
+
+验收方量到：`codec.encodeStart(TomlOps::INSTANCE, doc)` 的耗时随规模**翻倍约 ×4**
+（25 → 400 个风险项：1.3 ms → 248 ms），而 `dumpToml` 是线性的（0.17 → 1.80 ms）。
+
+**根因**：`TomlOps` 当时没有覆写 `listBuilder()` / `mapBuilder()`，于是走 `DynamicOps`
+的通用构造器（`UniversalListBuilder` / `UniversalRecordBuilder`），它们**逐元素**调
+`mergeToList` / `mergeToMap`；而 TOML 侧这两个方法每次都
+`toml::Array out = node->as<toml::Array>()`（同理 `toml::Table`）复制**整个已累积的容器**
+再追加一个元素 —— 每个元素一遍全量深拷贝 ⟹ 编码 O(N²)。JsonOps 没这个问题，因为它的
+`ArrayListBuilder` / `StringRecordBuilder` 把累加器挂在 `shared_ptr` 后面：DFU 的 Builder
+本来就是**可变对象**，由 applicative 链按引用携带，`add` 只追加、`build` 才成型。
+
+**修法**：给 TOML 也加 mutable 累加器 `TomlListBuilder` / `TomlRecordBuilder`
+（`codec_toml.hpp`）：状态与 `add` 重载、`withErrorsFrom` / `mapError` / lifecycle、
+prefix 的"空 or 非空"判定与错误消息都与 JsonOps 的对应构造器逐条一致，只有成型那一步是
+TOML 专有的；`TomlOps::listBuilder()` / `mapBuilder()` 覆写为它们。
+`mergeToList` / `mergeToMap` / `remove` 保留（它们是 DFU 的 ops 语义，供直接调用），
+不为它们强求线性。
+
+修完实测（`build/phase3/bench_toml3.cpp`，每个规模 best-of-5；单位 ms）：
+
+| 风险项 | encode | 倍率 | dumpToml | 倍率 | parseToml | decode | 倍率 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 25 | 0.24 | — | 0.16 | — | 0.25 | 0.12 | — |
+| 50 | 0.48 | 2.02× | 0.31 | 2.01× | 0.50 | 0.23 | 2.01× |
+| 100 | 1.08 | 2.26× | 0.63 | 2.00× | 1.01 | 0.48 | 2.04× |
+| 200 | 2.17 | 2.01× | 1.30 | 2.06× | 2.17 | 1.16 | 2.44× |
+| 400 | **4.42** | 2.04× | 2.57 | 1.98× | 4.42 | 2.19 | 1.89× |
+
+即 **N 翻倍 → 约 ×2，编码与解析、解码一样是线性的**；400 项的编码从 ~248 ms（验收方单次
+测量）降到 **4.1~4.4 ms**（复跑三次：4.10 / 4.42 / 4.72 ms，运行间波动约 ±7 %）。
+
+同一进程内直接对比两条构造路径（`build/phase3/bench_dump_probe.cpp`：`TomlOps` vs 显式
+退回通用构造器的 `QuadraticTomlOps`），两份产出逐字节相同（`identical=yes`）：
+
+| 风险项 | 新 encode | 旧 encode | 新 dump | 旧 dump |
+| ---: | ---: | ---: | ---: | ---: |
+| 25 | 0.24 | 1.19 | 0.16 | 0.16 |
+| 50 | 0.47 | 3.85 | 0.32 | 0.32 |
+| 100 | 0.95 | 14.45 | 0.63 | 0.63 |
+| 200 | 2.10 | 55.48 | 1.27 | 1.26 |
+| 400 | **4.10** | **215.30** | 2.57 | 2.59 |
+
+顺便证伪了一个假象：验收方那版单次测量里 `dumpToml` 看起来从 1.8 ms 涨到 2.6 ms，但同一
+进程内两条构造路径产出的树 dump 耗时**完全一致**（2.60 vs 2.59 ms）——差异来自测量条件
+（旧版是在 247 ms 的编码循环之后紧接着测的），与本改动无关。
+
+**取舍**：`build` 时仍对每个元素做一次深拷贝（`toml::Value` 是深拷贝类型，元素节点又属于
+别的所有者，借不过来）。这正是 JsonOps 的行为（`out.push_back(*node)` / `putRawMember`），
+所以两条路径的常数因子相同；关键是**逐元素累加阶段一次深拷贝都不做**。理论上可以把累加器
+`move` 出去省掉成型时的那次元素拷贝，但 `withErrorsFrom` 会把失败结果连同**部分值**一起保留
+（`detail::propagateErrors` 里的 `errorParts(..., builder.value(), ...)`），从共享状态里搬走
+容器会让那条路径观察到 moved-from 状态，因此选择与 JSON 一致的"复制成型"。
+
+**回归可见性**：新增 `test/perf/toml_perf_test.cpp`（可执行文件 `codec_toml_perf_tests`，
+CTest 前缀 `toml_perf.`，3 个用例：一致性守卫 + 2 风险 + 400/40 风险），打印 parse / decode /
+encode / dumpToml / 双向 convertTo 与 `per-risk encode`。它**单独一个可执行文件**，不并入
+`codec_perf_tests`：一是让核心 perf 二进制保持不依赖 tinytoml，二是避免给那个二进制加代码
+——§4.3 已经量出代码布局能移动数字 ±3 %。若编码再退回通用构造器，这里会以 `per-risk encode`
+从 ~20 µs/risk 跳到 ~550 µs/risk 的形式直接暴露。
+
 ## 5. 阶段 1–4（每阶段门禁：全绿 + perf 复测）
 
 改动面（按段量化，`JsonValue` 出现次数）：
@@ -186,7 +306,7 @@ codec 解码 16 422 ns（基线 15 500，+5.9 %），比值 vs 裸 parser 1.344�
 | --- | --- | --- | --- |
 | 1 | 4–5 段 + 6–8 段改签名；`JsonOps` 装箱/拆箱；`JsonValue` 公开 API 不变 | 174 + perf ≤5 % | **完成**（174/174；绝对性能持平，见 §4.2） |
 | 2 | `Passthrough` → `Codec<Dynamic>`；`models/risk_def.hpp` 的 `value` 成员跟进；`Dynamic` 类型落地 | 全绿 | **完成**（181/181；`Passthrough` 严格照 `Codec.java:197-224`；新增 `test/unit/dynamic_test.cpp` 7 个用例；头文件里 `value.asJson()` 调用点 43 → **0**） |
-| 3 | `TomlOps`（toml++ 单头文件）实现 ops；「同一 codec 吃 JSON/TOML → 同结构」交叉用例；TOML 行列错误位置；`convertTo` 变成真转换 | 新增用例 | 待做 |
+| 3 | `TomlOps`（[tinytoml](https://github.com/mayah/tinytoml) v0.4，用户指定）实现 ops；「同一 codec 吃 JSON/TOML → 同结构」交叉用例；`convertTo` 变成真转换；通用代码里最后两处 JSON 假设改成 ops 级钩子；TOML 侧 mutable 构造器（修掉验收发现的 O(N²) 编码） | 新增用例 | **完成**（202/202；新增 `include/codec_toml.hpp` + 14 个 unit + 4 个 smoke + 3 个 perf 用例；`CODEC_BUILD_TOML` 可选层；`getMap` 改纯虚、新增 `isStringKey` 钩子、通用 `UniversalListBuilder`；性能见 §4.3、§4.4） |
 | 4 | 文档：格式支持矩阵、§7 性能重测、删除原型与本文档的实验章节 | — | 待做 |
 
 阶段 1 实际做出来时比原计划多做了 6–8 段（原本排在阶段 2），并顺带补了两件今天缺的东西：
@@ -198,9 +318,17 @@ codec 解码 16 422 ns（基线 15 500，+5.9 %），比值 vs 裸 parser 1.344�
 * `Value` 的公开构造入口（`JsonValue → Value` 隐式转换），让
   `codec.parse(JsonOps::INSTANCE, JsonValue::parse(text))` 这类现有写法不用改。
 
-阶段 1 还留了两处"通用代码里的 JSON 假设"，已在头文件注释里标注为待办，接第二种格式前必须改成
-ops 级钩子：`DynamicOps::getMap` 的默认实现（构造 `JsonObjectMapLike`）与 `unboundedMap` 里
-"键是不是字符串"的判断。
+阶段 1 还留了两处"通用代码里的 JSON 假设"，已在**阶段 3 全部改成 ops 级钩子**：
+
+* `DynamicOps::getMap` 的默认实现（构造 `JsonObjectMapLike`）→ 改成**纯虚**，由 `JsonOps`
+  与 `TomlOps` 各自实现自己格式的 `MapLike`（JSON 对象视图 / TOML 表视图）；
+* `unboundedMap` 里"键是不是字符串"的判断 → 新增 `DynamicOps::isStringKey(const Value&)`
+  钩子（默认走 `getStringValue` 是否成功，`JsonOps` 覆盖为"严格是 JSON 字符串"，与移植前逐字一致）；
+  键文本也改成只在出错时才向 ops 索取（见 §4.3）。
+
+阶段 3 还顺手把 `DynamicOps::listBuilder()` 的默认实现换成通用的 `UniversalListBuilder`
+（逐元素 `mergeToList`，不依赖具体 DOM），`JsonOps` 仍覆盖为自己的 `ArrayListBuilder`，
+因此 JSON 的列表构建路径没有变化。`TomlOps` 不复用任何 JSON 代码。
 
 ## 6. 用户可见影响
 
@@ -215,18 +343,28 @@ ops 级钩子：`DynamicOps::getMap` 的默认实现（构造 `JsonObjectMapLike
   `std::optional<Dynamic> value`；渲染动态值请用
   `value->ops().toString(value->value())`（示例里就是这么做的，输出文本不变），
   `Value::asJson()` 仍然保留，但只作为 JSON 的逃生口（库内部已无调用点）。
-* **新增**：`TomlOps::INSTANCE` 可直接喂给同一批 codec；`Dynamic::convertTo` 在格式间搬运。
+* **阶段 3 新增**：`include/codec_toml.hpp`（独立可选层，`CODEC_BUILD_TOML` / `codec_toml`
+  目标）提供 `TomlDocument`、`parseToml`、`TomlOps::INSTANCE`、`dumpToml`；同一批 codec 可直接
+  喂 `TomlOps`，`convertTo` 双向可用，`Dynamic`/`Passthrough` 能在格式间搬运。
+* **阶段 3 的破坏性变更**（对本仓库以外的 `DynamicOps` 派生类）：`getMap` 从"有默认实现的
+  虚函数"变成**纯虚**。仓库内部的 `JsonOps`/`TomlOps` 都已实现；第三方若自己继承过
+  `DynamicOps` 并依赖那个默认实现，需要自己写 5 行 `getMap`。
+* **阶段 3 的能力边界**（tinytoml v0.4，非本移植）：不支持点号键（引号 `"a.b"` 可以）、
+  数组必须同型、不支持本地时间（本地日期会被规范化成 UTC 日期时间）、键按字典序写出
+  （因此不是逐字节往返）、无 `null`（写出前校验会拒绝）、codec 错误给的是 codec 路径而不是
+  TOML 行列号（tinytoml 不保存值的源码位置，只有解析错误有 `line N`）。
 
 ## 7. 风险与对策
 
 | 风险 | 对策 / 判据 |
 | --- | --- |
-| 热路径变慢 | 已解决：首版 +5.9 %（绝对值），按 §4.2 消除多余所有权流量后回到 **−0.5 %**（15 423 vs 15 500 ns）；不需要 JSON 旁路 |
+| 热路径变慢 | 已解决：首版 +5.9 %（绝对值），按 §4.2 消除多余所有权流量后回到 **−0.5 %**（15 423 vs 15 500 ns）；阶段 3 复测见 §4.3（隔离解码在布局噪声内，`unboundedMap` 首版的 +20~24 ns/条目已修正），不需要 JSON 旁路 |
 | 装箱引入分配 | 已证明为 0（复用 `JsonValue` 的所有者），阶段 1 的读/写路径同样是"1 次分配 + 0 原子" |
 | 跨格式误用句柄（静默 UB） | 保留 32 字节标签；`convertTo` 一律经 `outOps` 重建 |
 | 临时量生命周期 | §4.1 第 1 条写进规范；考虑让 `getMap`/`getList` 返回共享句柄而不是按值 `vector` |
 | 压缩 ops / `KeyCompressor`（NBT 风格） | 键也是 `Value`；阶段 1 后 `dynamic_ops_test` 仍全绿（97 条断言未变） |
-| 通用代码里残留 JSON 假设 | 已知两处（`DynamicOps::getMap` 默认实现、`unboundedMap` 的键类型判断），已在头文件注释标注，接第二种格式前改成 ops 级钩子 |
+| 通用代码里残留 JSON 假设 | 已清零：`getMap` 纯虚 + `isStringKey` 钩子（阶段 3），头文件里 `value.asJson()` 调用点 0 处 |
+| perf 数字本身不可靠 | 阶段 3 证明"隔离解码"的 ±3 % 可能只是代码布局（§4.3）；结论以同源 A/B + 端到端指标为准，README §7 已补这条方法论 |
 | 编译时间 | 擦除方案不增加模板实例化，应基本不变（这也是不选 B1 的理由之一） |
 
 ## 8. 复现

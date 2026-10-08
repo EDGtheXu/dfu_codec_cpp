@@ -1,5 +1,7 @@
 * text=auto
 # The vendored nlohmann single header is kept byte-identical to upstream.
 third_party/nlohmann/json.hpp -text
+# Same for the vendored tinytoml parser (TOML support, include/codec_toml.hpp).
+third_party/tinytoml/toml/toml.h -text
 *.png binary
 *.jar binary

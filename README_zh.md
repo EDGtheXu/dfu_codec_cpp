@@ -11,11 +11,14 @@
 `reference/dfu-6.0.8/`。这些源码属于 Mojang，仅作阅读参考——不参与构建，也刻意
 不纳入版本管理——脚本的作用是让本次移植的来源可复现。
 
-* 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 4 400 行，CMake `INTERFACE` 目标，无需编译任何源文件
+* 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 5 000 行，CMake `INTERFACE` 目标，无需编译任何源文件；可选的 TOML 层是另一个单头文件 [`include/codec_toml.hpp`](include/codec_toml.hpp)（约 730 行）
 * 头文件内的注释为**中文**；API 名、错误消息、测试名与两份 README 保持中英各自原本的语言
 * 分层测试：[`test/unit/`](test/unit)（155 个用例）、[`test/smoke/`](test/smoke)
   （23 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
-  性能对比）——每层一个独立可执行文件
+  性能对比）、以及可选的 TOML 层（[`test/unit/toml_ops_test.cpp`](test/unit/toml_ops_test.cpp)
+  14 个 + [`test/smoke/toml_risk_def_test.cpp`](test/smoke/toml_risk_def_test.cpp)
+  4 个 + [`test/perf/toml_perf_test.cpp`](test/perf/toml_perf_test.cpp) 3 个用例，
+  共 202 个）——每层一个独立可执行文件
 * 参考用例（风险定义文档）：[`models/risk_def.hpp`](models/risk_def.hpp)
 * 可运行示例：[`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -50,6 +53,7 @@ DataResult<Value> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, value);
 | C++ | **C++17**（`/std:c++17`、`-std=c++17`） | 必需（C++20/23 可解锁下面可选的诊断能力） |
 | [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0（单头文件） | `third_party/nlohmann/json.hpp` |
 | [GoogleTest](https://github.com/google/googletest) | 1.17.0 | `third_party/googletest-1.17.0`（仅测试用） |
+| [tinytoml](https://github.com/mayah/tinytoml) | v0.4 | `third_party/tinytoml`（仅可选的 TOML 层用） |
 | CMake | ≥ 3.16，Ninja 或 MSBuild | 构建 |
 
 库本身是 header-only，没有什么需要配置的；但由于头文件注释是中文，**在这个工程的
@@ -57,7 +61,7 @@ CMake 目标之外**直接用 MSVC 编译时需要 `/utf-8`（或 `/source-chars
 `codec` 目标已经加上了。
 
 ```powershell
-# 1. 拉取 nlohmann/json 与 GoogleTest（需要代理时加 -Proxy http://127.0.0.1:7890）
+# 1. 拉取 nlohmann/json、GoogleTest 与 tinytoml（需要代理时加 -Proxy http://127.0.0.1:7890）
 powershell -File scripts/fetch_deps.ps1 [-Proxy http://127.0.0.1:7890]
 
 # 2. 构建（通过 vcvars64.bat 使用 MSVC）并运行测试
@@ -69,7 +73,7 @@ powershell -File scripts/build.ps1 -RunTests
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 全部测试层，181 个用例
+ctest --test-dir build --output-on-failure   # 全部测试层，202 个用例
 cmake --build build --target check           # 等价的一键目标
 build/examples/risk_def_example.exe          # 可选：示例文档演示
 
@@ -79,24 +83,29 @@ cmake -S . -B cmake-build-stacktrace -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEC_R
 
 | CMake 选项 | 默认 | 作用 |
 | --- | --- | --- |
-| `CODEC_BUILD_TESTS` | `ON` | 构建三个测试层 |
+| `CODEC_BUILD_TESTS` | `ON` | 构建各测试层 |
 | `CODEC_BUILD_EXAMPLES` | `ON` | 构建示例程序 |
 | `CODEC_WARNINGS_AS_ERRORS` | `OFF` | `/WX`、`-Werror` |
 | `CODEC_RECORD_STACKTRACE` | `OFF` | 定义 `CODEC_RECORD_STACKTRACE`、按 C++23 编译，并为每个错误抓取 `std::stacktrace` |
+| `CODEC_BUILD_TOML` | `ON` | 构建可选的 TOML 层（`codec_toml` 目标 + 它的两个测试可执行文件）；需要 `third_party/tinytoml` |
 
-三个测试层是相互独立的可执行文件，因此也可以直接运行：
+每个测试层都是独立的可执行文件，因此也可以直接运行：
 
 ```powershell
-build/test/unit/codec_unit_tests.exe     [--gtest_filter=RecordCodecTest.*]
-build/test/smoke/codec_smoke_tests.exe   [--gtest_filter=SmokeTest.*]
-build/test/perf/codec_perf_tests.exe     [--gtest_filter=PerfTest.SmallDocument]  # 打印表格
+build/test/unit/codec_unit_tests.exe          [--gtest_filter=RecordCodecTest.*]
+build/test/smoke/codec_smoke_tests.exe        [--gtest_filter=SmokeTest.*]
+build/test/perf/codec_perf_tests.exe          [--gtest_filter=PerfTest.SmallDocument]  # 打印表格
+build/test/codec_toml_unit_tests.exe          [--gtest_filter=TomlOpsTest.*]          # TOML 层
+build/test/codec_toml_smoke_tests.exe         [--gtest_filter=TomlRiskDefTest.*]
+build/test/codec_toml_perf_tests.exe          [--gtest_filter=TomlPerfTest.SmallDocument]  # 打印表格
 ```
 
 **在 CLion 中运行。** 本项目就是普通的 CMake 工程：用 CLion 打开目录并让它完成
-配置后，所有用例都会出现在 Run/Debug 下拉框中——`All CTest` 一键运行三个测试层，
-`unit.*` / `smoke.*` / `perf.*` 按层分组，每个 `TEST(...)`（包括每个基准测试夹具）
-都可单独运行或调试；目标列表里还有 `check` 目标。性能层会自动校准迭代次数，
-Release 下约 3.5 秒、Debug 下约 13 秒；`ctest -R perf -V` 可以打印它的表格。
+配置后，所有用例都会出现在 Run/Debug 下拉框中——`All CTest` 一键运行全部测试层，
+`unit.*` / `smoke.*` / `perf.*` / `toml_unit.*` / `toml_smoke.*` / `toml_perf.*`
+按层分组，每个 `TEST(...)`（包括每个基准测试夹具）都可单独运行或调试；目标列表里
+还有 `check` 目标。两个性能层各自校准迭代次数（Release 下 JSON 层约 6.4 秒、TOML 层
+约 5.6 秒，Debug 下约一半）；`ctest -R perf -V` 可以打印它们的表格。
 
 测试套件已在 **MSVC 14.44（VS2022 / CLion）Debug** 与
 **MSVC 14.50（VS2026）Release** 下验证通过。
@@ -109,8 +118,10 @@ Release 下约 3.5 秒、Debug 下约 13 秒；`ctest -R perf -V` 可以打印�
 > `test/unit/json_test.cpp`。像 `R"({"a":1})"` 这样不含反斜杠的原始字符串不受影响。
 
 CMake 选项：`CODEC_BUILD_TESTS`、`CODEC_BUILD_EXAMPLES`、
-`CODEC_WARNINGS_AS_ERRORS`。库目标名为 `codec`（别名 `codec::codec`），链接它并
-`#include "codec.hpp"` 即可。
+`CODEC_WARNINGS_AS_ERRORS`、`CODEC_RECORD_STACKTRACE`、`CODEC_BUILD_TOML`。库目标名为
+`codec`（别名 `codec::codec`），链接它并 `#include "codec.hpp"` 即可。可选的 TOML 层
+是独立目标 `codec_toml`（`#include "codec_toml.hpp"`），它链接 `codec` 并加上 tinytoml
+的 include 目录——核心头文件永远不会看到 tinytoml。
 
 ### 仅头文件，且只有一个文件
 
@@ -142,9 +153,10 @@ nlohmann/json。
   GoogleTest）包含 `codec.hpp`，因此这个头文件无法从别处借用任何声明；
 * 另有 8 个翻译单元只包含它这一个库头文件。
 
-唯一的编译期依赖是 [nlohmann/json](#关于-json-值类型)（`third_party/` 下的单头文件，
-也可以换成你自己 include 路径上的副本）；测试额外需要 GoogleTest，而 `INTERFACE`
-目标不会把它传递出去。
+核心头文件唯一的编译期依赖是 [nlohmann/json](#关于-json-值类型)（`third_party/` 下的单头
+文件，也可以换成你自己 include 路径上的副本）；测试额外需要 GoogleTest，而 `INTERFACE`
+目标不会把它传递出去。可选的 TOML 层只会再加一个依赖：tinytoml，而且只属于 `codec_toml`
+——见 [TOML 层](#toml-层codec_tomlhpp可选)。
 
 ### 关于 JSON 值类型
 
@@ -166,9 +178,9 @@ DFU 的 `JsonOps` 基于 Gson 的 `JsonElement`。本移植改用 **nlohmann/jso
 
 `JsonValue` 之上是 ops 层自己的值类型 `codec::Value`：一个格式无关的句柄
 （共享所有者 + 节点指针 + 类型标签），所有 `DynamicOps` 实现都用它收发值，因此第二
-种格式（TOML、NBT）的 ops 可以直接插进同一批 codec。配 `JsonOps` 时载荷就是
-`JsonValue` 节点，用 `value.asJson()` 取回即可；这次擦除的代价测不出来：2 风险项
-codec 解码 **15 423 ns**，改动前的同机基线是 15 500 ns（见 §7 与
+种格式的 ops 可以**原样**插进同一批 codec——下面的 TOML 层就是这么做的。配 `JsonOps`
+时载荷就是 `JsonValue` 节点，用 `value.asJson()` 取回即可；这次擦除的代价测不出来：
+2 风险项 codec 解码 **15 423 ns**，改动前的同机基线是 15 500 ns（见 §7 与
 [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)）。
 
 ```cpp
@@ -180,6 +192,71 @@ value.get("missing").has_value();                        // false
 
 值一旦构造就不可变；请通过 `JsonValue::object(...)`、`JsonValue::array(...)` 或
 直接使用 nlohmann 构造新文档。
+
+### TOML 层（`codec_toml.hpp`，可选）
+
+`JsonOps` 不再是特殊的：既然 ops 层收发的已经是格式无关的 `Value`，接第二种格式就是
+再写一个 `DynamicOps`，别的什么都不用改。[`include/codec_toml.hpp`](include/codec_toml.hpp)
+就是 TOML 的那一个，底层用 [tinytoml](https://github.com/mayah/tinytoml)（vendored 在
+`third_party/tinytoml`），而且**同一批 codec 同时吃两种格式**：
+
+```cpp
+#include "codec_toml.hpp"
+
+const DataResult<TomlDocument> document = codec::parseToml(text);
+const DataResult<RiskDocument> risks =
+    RiskDocumentCodec.parse(codec::TomlOps::INSTANCE, document.result()->root());
+
+// …… 再写回去（TOML 文档的根永远是一张表）。
+const DataResult<std::string> encoded = codec::dumpToml(encodedValue.result());
+```
+
+`TomlDocument` 持有解析出的 `toml::Value`（共享所有权，和 `JsonValue` 持有自己的文档
+一样）；`parseToml` 会把 tinytoml 自己的消息原样报出来（`Error: line 2: Invalid token`），
+因此解析失败仍然带行号。`TomlOps::INSTANCE` 实现了完整的 `DynamicOps` 接口——包括
+`convertTo`，所以值可以在 JSON 与 TOML 之间双向搬运
+（`JsonOps::INSTANCE.convertTo(TomlOps::INSTANCE, value)` 与反向），这也正是
+`Dynamic`/`Passthrough` 的载荷能跨格式的原因。
+
+类型对照（tinytoml → `codec::Value`）：
+
+| TOML | `DynamicOps` 视角 | 读取方式 | 说明 |
+| --- | --- | --- | --- |
+| `INT_TYPE` | number | `getNumberValue`（整数） | tinytoml 用的是 `int64_t` |
+| `DOUBLE_TYPE` | number | `getNumberValue`（浮点） | 写回时会渲染成 `1.500000` |
+| `BOOL_TYPE` | boolean | `getBooleanValue` | **不是**数字——与 `JsonOps` 不同（后者把 `true` 读成 `1`，DFU 的 Gson 行为） |
+| `STRING_TYPE` | string | `getStringValue` | |
+| `TIME_TYPE` | string | `getStringValue` | 渲染后如 `1979-05-27T07:32:00Z`；不是数字 |
+| `ARRAY_TYPE` | list | `getStream` / `getList` | 要能写回必须同型 |
+| `TABLE_TYPE` | map | `getMap` | 键用 `findChild` 查找，因此字面键 `"a.b"` 永远不会被当成路径 |
+
+有两处 `TomlOps`/`JsonOps` 的有意差异，测试把它们钉住了而不是藏起来：`valueEquals` 是
+类型严格的（`1 != 1.0`，而 Gson 的数字比较是相等的），以及 `mergeToMap` 遇到非字符串键
+会报错（`key is not a string: 1`，沿用 DFU 里 `createMap` 跳过、`mergeToMap` 报错的分工）。
+
+**这一层的边界**（都来自 tinytoml v0.4，不是本移植造成的）：
+
+* **点号键在解析阶段就被拒绝**（`a.b = 1` 报错）；**引号**键 `"a.b"` 是字面键，可以正常
+  使用，因为 `TomlOps` 按直接子节点查找而不是按路径；
+* 数组必须**同型**，不支持本地时间（`07:32:00`），本地日期会被规范化成 UTC 日期时间；
+* 键按**字典序**写出（tinytoml 内部是 `std::map`），所以重新编码后与输入不逐字节相同
+  ——稳定的是一来一回的语义，不是文件本身；
+* `null` 在 TOML 没有对应物：`dumpToml` 会拒绝并指出是哪个键。字段可能缺失时请用
+  `optionalFieldOf`（缺失的键干脆不写出）；
+* **codec 错误带的是 codec 路径而不是 TOML 行列号**
+  （`risks[3].condition.op: expected string, got number`），因为 tinytoml 不为值保存源码
+  位置；只有它的解析错误带行号；
+* 根不是表时无法写出（`must be a table at the root`）——TOML 文档就是一张表，写出前先
+  校验，而不是生成一份解析不回来的文本。
+
+实测代价（§7）：编码是**线性**的——2 风险样例约 24 µs，400 风险文档（413 KB TOML）约
+4.1–4.4 ms——因为 `TomlOps` 用的是自己的 mutable 累加器构造器，而不是逐元素调
+`mergeToList` / `mergeToMap` 的通用构造器（那两个方法每次调用都复制整个容器）。
+400 风险文档的 `dumpToml` 约 2.6 ms；tinytoml 的解析器比 nlohmann 慢约 4 倍
+（约 2 KB 的文档：≈45 µs vs ≈12 µs）。
+
+这一层默认开启（`CODEC_BUILD_TOML=ON`），但完全独立：`-DCODEC_BUILD_TOML=OFF` 之后工程
+里没有任何地方需要 tinytoml。
 
 ## 2. 目录结构
 
@@ -200,9 +277,11 @@ test/
   unit/                codec_unit_tests   -- 组件级测试套件（含 ODR 守护）
   smoke/               codec_smoke_tests  -- 端到端 API 检查
   perf/                codec_perf_tests   -- codec 与 nlohmann/json 的性能测量
+  unit/toml_ops_test.cpp, smoke/toml_risk_def_test.cpp, perf/toml_perf_test.cpp
+                       -- TOML 层的三个可执行文件
 examples/              risk_def_main.cpp
 reference/dfu-6.0.8/   反编译得到的 Java 原始代码（仅供阅读）
-third_party/           nlohmann/json、googletest
+third_party/           nlohmann/json、googletest、tinytoml
 scripts/               fetch_deps.ps1、build.ps1
 ```
 
@@ -214,8 +293,11 @@ scripts/               fetch_deps.ps1、build.ps1
 | `Encoder<A>`、`Decoder<A>`、`MapEncoder<A>`、`MapDecoder<A>` | 同样四个包装器，同样的组合子 |
 | `Codec.of(encoder, decoder)` / `MapCodec.of(...)` | 同名工厂函数 |
 | `MapCodec.MapCodecCodec` | 由 `MapCodec` 构造的 `Codec`（隐式转换，`Codec::mapCodec()` 可识别） |
-| `DynamicOps<T>`（`T` = `JsonElement`） | 单一 `JsonValue` 之上的抽象 `DynamicOps` |
+| `DynamicOps<T>`（`T` = `JsonElement`、`NbtTag`…） | 格式无关的 `Value` 之上的抽象 `DynamicOps`；`JsonOps`（nlohmann）与 `TomlOps`（`codec_toml.hpp`）各自实现 |
+| `DynamicOps.convertTo(otherOps, value)` | 同名，而且是**真转换**：`JsonOps` ⇄ `TomlOps` 双向可用 |
+| `Dynamic<T>` | `codec::Dynamic`：一个 `Value` 加上懂它的 ops（`Passthrough` 的载体） |
 | `JsonOps.INSTANCE` / `JsonOps.COMPRESSED` | `JsonOps::INSTANCE` / `JsonOps::COMPRESSED` |
+| `JsonOps`（基于 Gson） | 基于 `JsonValue`（nlohmann/`ordered_json`）的 `JsonOps`，另加基于 tinytoml 的 `TomlOps` |
 | `DataResult<R>`（`Either<R, PartialResult<R>>`） | `DataResult<R>`（可选值 + 可选错误，保留部分值） |
 | `Lifecycle` | `Lifecycle`（`add` 规则一致） |
 | `RecordCodecBuilder.create(i -> i.group(f1, f2).apply(i, Ctor::new))` | `record<O>(f1, f2)` 或 `record<O>(ctor, f1, f2)` |
@@ -225,7 +307,7 @@ scripts/               fetch_deps.ps1、build.ps1
 | `codec.dispatch` / `partialDispatch` / `dispatchMap` | 同名（`KeyDispatchCodec`） |
 | `Codec.intRange` / `floatRange` / `doubleRange` | 同名 |
 | `Codec.checkRange` | 内联进各范围 codec |
-| `DynamicOps` 中的 `Stream<T>` | `std::vector<JsonValue>`（实体化） |
+| `DynamicOps` 中的 `Stream<T>` | `std::vector<Value>`（实体化） |
 | `Optional<T>` | `std::optional<T>` |
 | `Pair<A, B>` | `std::pair<A, B>` |
 | `Either<L, R>` | `codec::Either<L, R>`（基于 variant） |
@@ -237,13 +319,15 @@ scripts/               fetch_deps.ps1、build.ps1
 `RecordCodecBuilder`、`KeyDispatchCodec`、`SimpleMapCodec` 的键压缩机制
 （`KeyCompressor`、压缩版 record/list 构建器）、`Lifecycle`、`DataResult`
 （含 `apply2`/`apply2stable`/`apply3`、`promotePartial`、`setPartial`、
-`mapError`、`resultOrPartial`、`getOrThrow`），以及 `Codec`/`MapCodec` 的完整
+`mapError`、`resultOrPartial`、`getOrThrow`）、`Dynamic`（值 + ops 的组合，也就是
+`Passthrough` 的载体），以及 `Codec`/`MapCodec` 的完整
 组合子接口（`xmap`、`flatXmap`、`comapFlatMap`、`flatComapMap`、`orElse`、
 `orElseGet`、`mapResult`、`withLifecycle`、`stable`、`deprecated`、`fieldOf`、
 `optionalFieldOf`、`promotePartial`）。
 
 不在移植范围内（DFU 中建立在 Codec *之上* 的部分）：`DataFixer`、`Schema`、
-`TypeRewriteRule`、optics/profunctor 机制以及 `NbtOps`/`Dynamic` 包装。
+`TypeRewriteRule`、optics/profunctor 机制以及 `NbtOps`（TOML 的 ops 放在
+`codec_toml.hpp` 里，正好示范接一个 `NbtOps` 需要多少工作：再写一个 `DynamicOps`）。
 
 ### 标量转换（enum、数字、字符串）
 
@@ -479,7 +563,9 @@ Codec<Condition> conditionCodec() {
 
 | 方面 | DFU | 本移植 | 原因 |
 | --- | --- | --- | --- |
-| `DynamicOps` 值类型 | 泛型 `T`（JsonElement、NbtTag……） | 类型擦除的 `Value` 句柄（所有者 + 节点 + 标签），外加 `Dynamic`（值 + 它的 ops）作为 `Passthrough` 的载体 | ops 层已经格式无关；`JsonValue` 是 `JsonOps` 背后的 JSON DOM，`convertTo` 在接入第二种格式后就是真正的转换（设计见 [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)） |
+| `DynamicOps` 值类型 | 泛型 `T`（JsonElement、NbtTag……） | 类型擦除的 `Value` 句柄（所有者 + 节点 + 标签），外加 `Dynamic`（值 + 它的 ops）作为 `Passthrough` 的载体 | ops 层格式无关；`JsonValue` 是 `JsonOps` 背后的 JSON DOM，`TomlDocument`/`TomlOps`（在 `codec_toml.hpp` 里）是 TOML 的那一份，`convertTo` 就是两者之间的真转换（设计见 [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)） |
+| 第二种 `DynamicOps` | DFU 里每种格式各一个（`JsonOps`、`NbtOps`） | `JsonOps` 在核心头文件里；`TomlOps` 在可选的 `codec_toml.hpp` 里，`codec` 目标不链接它 | 证明这套擦除确实格式无关，同时让 tinytoml 不进入核心头文件 |
+| `JsonOps.valueEquals`（数字） | Gson 的数字按值比较 | 保持不变：`1 == 1.0` | 忠实性；`TomlOps` 反过来是类型严格的（`1 != 1.0`），因为 tinytoml 的 `operator==` 如此 |
 | `Stream<T>` | Java 惰性流 | `std::vector` | 标准库没有惰性流 |
 | `KeyCompressor.compress` | 未知键 → `0`（fastutil 默认值） | 未知键 → `-1` → 视为不存在 | 避免静默读取索引 0 |
 | `UnboundedMapCodec` 重复键 | `ImmutableMap.Builder` 抛异常 | 后者覆盖，保持插入顺序 | 保证解码可用 |
@@ -496,8 +582,9 @@ Codec<Condition> conditionCodec() {
 
 ## 6. 测试分层
 
-181 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
-前缀（`unit.*`、`smoke.*`、`perf.*`），因此任何一层都可以按组选择运行。
+202 个 GoogleTest 用例分布在六个独立可执行文件中。`ctest` 会为每个用例加上所属层的
+前缀（`unit.*`、`smoke.*`、`perf.*`、`toml_unit.*`、`toml_smoke.*`、`toml_perf.*`），
+因此任何一层都可以按组选择运行。
 
 **`test/unit/` → `codec_unit_tests`（155 个用例）**——组件级，覆盖各种边界情况：
 
@@ -535,6 +622,18 @@ Codec<Condition> conditionCodec() {
 
 共享辅助代码位于 `test/support/test_support.hpp`（JSON 解析，以及会把 codec 错误
 消息作为失败原因抛出的 `decode` / `encode` / `decodeError` 包装）。
+
+**TOML 层有自己的三个可执行文件**（仅在 `CODEC_BUILD_TOML=ON` 时构建，这样其余测试层
+完全不需要 tinytoml 依赖）：
+
+| 文件 | 关注点 |
+| --- | --- |
+| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests`（14 个用例） | 把 `TomlOps` 当作 `DynamicOps` 来用：按类型读取标量、`BooleanIsNotANumber`、时间按字符串读、字面键 `"a.b"` 走 `findChild`、类型严格的相等、`convertTo` 双向（以及同 ops 恒等）、`dumpToml` 拒绝非表根 / `null` / 混型数组、解析错误带 `line 2`、v0.4 的边界（点号键、混型数组、本地时间）、空文档、严格键的列表/表合并；以及编码用的构造器（`TomlListBuilder`/`TomlRecordBuilder`）：并入前缀而不改动前缀、累加器复用、重复键 last-wins、`add`/`withErrorsFrom`/`mapError` 的错误传播、非字符串键、混进来的 JSON 句柄 |
+| `smoke/toml_risk_def_test.cpp` → `codec_toml_smoke_tests`（4 个用例） | **同一个** `RiskDocumentCodec` 同时吃 TOML 与 JSON（解出的结构完全相同）、dump → 重新解析稳定、`Passthrough` 的 `Dynamic` 从 JSON 搬到 TOML 再搬回来、TOML 值转回 JSON |
+| `perf/toml_perf_test.cpp` → `codec_toml_perf_tests`（3 个用例） | TOML 层的代价：`parseToml`、解析+解码、已解析解码、编码、编码+`dumpToml`、双向 `convertTo`，以及 `per-risk encode`——防止编码重新退回通用构造器的可见性守卫（见 §7） |
+
+TOML 性能层刻意做成独立可执行文件：往 `codec_perf_tests` 里加用例会扰动它已记录的 JSON
+数字（仅代码布局就有约 3 % 的影响，见 §7），也会把 tinytoml 拖进核心性能二进制。
 
 ## 7. 性能：Codec 与 nlohmann/json 对比
 
@@ -585,6 +684,16 @@ nlohmann/json 时会写出的代码：一种是手写提取，另一种是 nlohm
 > 比例，而比例稳定在约 ±15 % 以内）。大文档对"进程此前做了多少工作"很敏感：若只运行
 > `--gtest_filter=PerfTest.LargeDocument`，codec 解码实测约 4.8 ms 而不是约 7.0 ms。
 > 下结论前请在本地重跑；这套基准的用途是相对比较，而不是绝对断言。
+>
+> **单独一行的数字对代码布局同样敏感。** 用**完全相同的源码**多链一个从不被调用的
+> 翻译单元，`codec decode (pre-parsed)` 这一行就移动了 1.9 %；把同一份 perf 源码分别
+> 对着两个版本的 `include/codec.hpp` 编成两个 exe 做 A/B，同一行最大差到 3.4 %——而
+> **代码逐字节相同**的 parser 那一行反向移动了 4.7 %。所以请优先看端到端的
+> `解析 + codec 解码` 行，并在**同一个 exe 内**比较同一次运行的比例，而不是跨 exe 比较
+> 单独一行；实验记录见
+> [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md) §4.3。TOML 期间复测（同机、
+> 不同日期）得到 `ordered_json::parse` 11.5–11.8 µs、已解析解码 15.7–16.0 µs：parser 动了
+> 约 9 %，解码只动了约 2 %。
 >
 > **标注在成功路径上是零成本的。** 路径与栈帧（§3）只在错误向外传播时才构造，因此加入
 > 它们并没有改变上面的数字：同样取 5 次运行中位数复测，大文档从 7.03 ms 变为 6.68 ms
@@ -672,3 +781,38 @@ Codec 层付出了 2–3 倍解析代价却没有收益；此时 `get<T>()` 或�
 
 两者都属于设计层面的正确性问题（本移植在规模上表现得不像 DFU），而不是微优化；它们
 既被原有测试覆盖，也被新增的 `perf.StrategiesAgreeOnTheFixture` 等价性检查覆盖。
+
+### 同一个陷阱在 TOML 层又出现了一次
+
+第二种 `DynamicOps` 也踩了进去，而且是被验收抓出来的：`TomlOps` 起初没有覆写
+`listBuilder()` / `mapBuilder()`，于是走通用构造器——它们**逐元素**调
+`mergeToList` / `mergeToMap`，而 TOML 侧这两个方法每次都复制整个已累积的
+`toml::Array` / `toml::Table`，**编码因此是二次方**：400 个风险项要 **248 ms**
+（N 翻倍耗时约 ×4），而 `dumpToml` 一直是线性的 1.8 ms。现在 `TomlOps` 有了 TOML 侧的
+mutable 累加器（`TomlListBuilder` / `TomlRecordBuilder`，形状与错误语义都和 `JsonOps` 的
+`ArrayListBuilder` / `StringRecordBuilder` 一致）；`mergeToList` / `mergeToMap` 仍保留
+DFU 的"每次调用复制"语义，供直接调用者使用。
+
+实测（`test/perf/toml_perf_test.cpp` 与一条规模曲线，best-of-5，Release，单位毫秒）；
+N 翻倍现在各处都只翻倍：
+
+| 风险项 | encode | × | dumpToml | × | parseToml | decode | × |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 25 | 0.24 | — | 0.16 | — | 0.25 | 0.12 | — |
+| 50 | 0.48 | 2.02× | 0.31 | 2.01× | 0.50 | 0.23 | 2.01× |
+| 100 | 1.08 | 2.26× | 0.63 | 2.00× | 1.01 | 0.48 | 2.04× |
+| 200 | 2.17 | 2.01× | 1.30 | 2.06× | 2.17 | 1.16 | 2.44× |
+| 400 | **4.42** | 2.04× | 2.57 | 1.98× | 4.42 | 2.19 | 1.89× |
+
+也就是说 400 个风险项的文档（**413 KB TOML**）编码约 4.4 ms、dump 约 2.6 ms；编码从
+~248 ms（单次测量；同进程 best-of-5 的 A/B 是 215–219 ms）降到 **4.1–4.4 ms**。2 风险样例
+编码约 24 µs、解析约 45 µs、解码约 15 µs（与 `JsonOps` 同一量级）。
+
+关于这一层的代价有两条如实说明：**tinytoml 的解析器比 nlohmann 慢约 4 倍**（同样约 2 KB
+的文档：≈45 µs vs ≈12 µs）；并且 `mergeToList` / `mergeToMap` 按设计仍是 O(容器)——
+是构造器让 codec 路径保持线性，如果你自己在循环里调 `mergeToMap` 拼 TOML，
+那次复制就是你自己付。
+
+与 JSON 侧一样，TOML 性能层的数字只打印、不断言：`ctest -R toml_perf -V`，并留意
+`per-risk encode`（400 风险夹具约 20 µs/风险）——一旦编码退回通用构造器，它会跳到
+约 550 µs/风险。

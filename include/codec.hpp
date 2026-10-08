@@ -1907,6 +1907,55 @@ class ArrayListBuilder : public ListBuilder {
   DataResult<State> builder_;
 };
 
+// 通用列表构建器（DFU 的 DynamicOps.listBuilder() 默认实现）：把元素逐个
+// `mergeToList` 到 prefix 上，因此不依赖任何具体 DOM——接第二种格式时直接用。
+// JsonOps 覆盖 listBuilder()，改用自己的 ArrayListBuilder（直接在 JSON 数组上累加）。
+class UniversalListBuilder : public ListBuilder {
+ public:
+  using State = std::shared_ptr<std::vector<Value>>;
+
+  explicit UniversalListBuilder(const DynamicOps& ops)
+      : ops_(&ops), builder_(DataResult<State>::success(initial(), Lifecycle::stable())) {}
+
+  const DynamicOps& ops() const override { return *ops_; }
+
+  ListBuilder& add(const Value& value) override {
+    builder_ = builder_.map([value](const State& state) {
+      state->push_back(value);
+      return state;
+    });
+    return *this;
+  }
+
+  ListBuilder& add(const DataResult<Value>& value) override {
+    builder_ = builder_.apply2stable(
+        [](const State& state, const Value& element) {
+          state->push_back(element);
+          return state;
+        },
+        value);
+    return *this;
+  }
+
+  ListBuilder& withErrorsFrom(const DataResultBase& result) override {
+    builder_ = detail::propagateErrors(builder_, result);
+    return *this;
+  }
+
+  ListBuilder& mapError(const StringUnaryOperator& onError) override {
+    builder_ = builder_.mapError(onError);
+    return *this;
+  }
+
+  DataResult<Value> build(const Value& prefix) override;
+
+ private:
+  static State initial() { return std::make_shared<std::vector<Value>>(); }
+
+  const DynamicOps* ops_;
+  DataResult<State> builder_;
+};
+
 // ---------------------------------------------------------------------------
 // RecordBuilder<T>
 // ---------------------------------------------------------------------------
@@ -2148,6 +2197,11 @@ class DynamicOps {
     return left.node == right.node && left.tag == right.tag;
   }
 
+  // 键能否当作字段名？只用于给错误定位（例如 risks[0].severity: ...）。
+  // 默认按 ops 的字符串读取；JsonOps 覆盖为"严格是 JSON 字符串"，
+  // 于是压缩模式下的数字键仍然走位置分支（与移植前一致）。
+  virtual bool isStringKey(const Value& key) const { return getStringValue(key).isSuccess(); }
+
   // --- 基础类型 ---------------------------------------------------------
   virtual Value empty() const = 0;
 
@@ -2232,16 +2286,10 @@ class DynamicOps {
   virtual DataResult<std::vector<std::pair<Value, Value>>> getMapValues(
       const Value& input) const = 0;
 
-  virtual DataResult<MapLikePtr> getMap(const Value& input) const {
-    // Phase 1：这个默认实现仍由 JsonValue 支撑（本移植的 MapLike 就是 JSON
-    // 对象视图，且 JsonOps 依赖它的 null 怪癖）。接第二种 ops 时，它应当改成
-    // 基于 getMapValues 的通用实现，或由各 ops 自己覆盖。
-    const JsonValue::Raw* node = input.as<JsonValue::Raw>();
-    if (node == nullptr || !node->is_object()) {
-      return DataResult<MapLikePtr>::error("Not a JSON object: " + toString(input));
-    }
-    return DataResult<MapLikePtr>::success(std::make_shared<JsonObjectMapLike>(input.owner, node));
-  }
+  // MapLike 的形状是格式特有的（JSON 对象视图、TOML 表……），因此由各 ops
+  // 自己实现。Phase 1 那个"构造 JsonObjectMapLike"的默认实现是通用代码里最后
+  // 两处 JSON 假设之一，Phase 3 把它改成纯虚。
+  virtual DataResult<MapLikePtr> getMap(const Value& input) const = 0;
 
   virtual Value createMap(const std::vector<std::pair<Value, Value>>& entries) const = 0;
 
@@ -2388,6 +2436,19 @@ inline DataResult<Value> ArrayListBuilder::build(const Value& prefix) {
   return result;
 }
 
+inline DataResult<Value> UniversalListBuilder::build(const Value& prefix) {
+  DataResult<Value> result = builder_.flatMap([&](const State& values) -> DataResult<Value> {
+    DataResult<Value> merged = DataResult<Value>::success(prefix);
+    for (const Value& value : *values) {
+      merged = merged.flatMap(
+          [&](const Value& current) { return ops_->mergeToList(current, value); });
+    }
+    return merged;
+  });
+  builder_ = DataResult<State>::success(initial(), Lifecycle::stable());
+  return result;
+}
+
 inline DataResult<Value> UniversalRecordBuilder::buildState(const State& state,
                                                                 const Value& prefix) {
   return ops_->mergeToMap(prefix, *state);
@@ -2433,7 +2494,8 @@ inline DataResult<Value> CompressedRecordBuilder::buildState(const State& state,
 }
 
 inline std::shared_ptr<ListBuilder> DynamicOps::listBuilder() const {
-  return std::make_shared<ArrayListBuilder>(*this);
+  // 通用实现；JsonOps 覆盖为 ArrayListBuilder（JSON 数组上累加）。
+  return std::make_shared<UniversalListBuilder>(*this);
 }
 
 inline std::shared_ptr<RecordBuilder> DynamicOps::mapBuilder() const {
@@ -2506,12 +2568,15 @@ class JsonOps : public DynamicOps {
   // （以及随之而来的引用计数）。
   Value empty() const override { return empty_; }
 
+  // DFU 的 convertTo：把值重写成目标 ops 的表示（同一个 ops 时恒等）。
+  // 由**源** ops 递归遍历自己的 DOM、逐节点调用目标 ops 的 createX；
+  // JSON 的 null 映射为 outOps.empty()（保持全函数语义——真正的拒绝发生在
+  // 写出前的校验里，例如 dumpToml）。
   Value convertTo(const DynamicOps& outOps, const Value& input) const override {
-    (void)outOps;
-    // 到目前为止值类型是通用的（JsonValue 扮演 DFU 里 JsonElement 的角色），
-    // 因此跨 ops 的转换仍是恒等；接第二种 ops 时这里改为
-    // 由源 ops 递归遍历自己的 DOM、逐节点调用目标 ops 的 createX。
-    return input;
+    if (&outOps == this) {
+      return input;
+    }
+    return convertNode(outOps, *requireNode(input));
   }
 
   // ops 自己的名字（诊断用）。
@@ -2674,6 +2739,19 @@ class JsonOps : public DynamicOps {
     return DataResult<std::vector<std::pair<Value, Value>>>::success(std::move(out));
   }
 
+  DataResult<MapLikePtr> getMap(const Value& input) const override {
+    const JsonValue::Raw* node = requireNode(input);
+    if (!node->is_object()) {
+      return DataResult<MapLikePtr>::error("Not a JSON object: " + node->dump());
+    }
+    return DataResult<MapLikePtr>::success(std::make_shared<JsonObjectMapLike>(input.owner, node));
+  }
+
+  bool isStringKey(const Value& key) const override {
+    const JsonValue::Raw* node = key.as<JsonValue::Raw>();
+    return node != nullptr && node->is_string();
+  }
+
   Value createMap(const std::vector<std::pair<Value, Value>>& entries) const override {
     JsonValue::Raw out = JsonValue::Raw::object();
     for (const auto& entry : entries) {
@@ -2752,6 +2830,39 @@ class JsonOps : public DynamicOps {
   static Value box(JsonValue::Raw&& node) {
     auto owner = std::make_shared<const JsonValue::Raw>(std::move(node));
     return Value::of<JsonValue::Raw>(std::move(owner), owner.get());
+  }
+
+  // 以 JSON 节点为源、逐节点导出到目标 ops（convertTo 的递归实现）。
+  static Value convertNode(const DynamicOps& outOps, const JsonValue::Raw& node) {
+    switch (node.type()) {
+      case JsonValue::Raw::value_t::boolean:
+        return outOps.createBoolean(node.get<bool>());
+      case JsonValue::Raw::value_t::number_integer:
+      case JsonValue::Raw::value_t::number_unsigned:
+      case JsonValue::Raw::value_t::number_float:
+        return outOps.createNumeric(detail::numberOf(node));
+      case JsonValue::Raw::value_t::string:
+        return outOps.createString(node.get_ref<const std::string&>());
+      case JsonValue::Raw::value_t::array: {
+        std::vector<Value> elements;
+        for (auto it = node.begin(); it != node.end(); ++it) {
+          elements.push_back(convertNode(outOps, *it));
+        }
+        return outOps.createList(std::move(elements));
+      }
+      case JsonValue::Raw::value_t::object: {
+        std::vector<std::pair<Value, Value>> entries;
+        for (auto it = node.begin(); it != node.end(); ++it) {
+          entries.emplace_back(outOps.createString(it.key()), convertNode(outOps, it.value()));
+        }
+        return outOps.createMap(std::move(entries));
+      }
+      case JsonValue::Raw::value_t::null:
+      case JsonValue::Raw::value_t::discarded:
+      case JsonValue::Raw::value_t::binary:
+        return outOps.empty();
+    }
+    return outOps.empty();
   }
 
   // Java 的 `key.getAsString()`：字符串，或压缩模式下的数字。
@@ -4150,22 +4261,24 @@ Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec,
           std::vector<std::pair<Value, Value>> failed;
           DataResult<Unit> result = DataResult<Unit>::success(Unit{}, Lifecycle::stable());
           for (const auto& entry : map->entries()) {
-            // 用键定位出错的条目（非字符串键则用它的位置）。
-            // Phase 1：这里仍按 JSON 判断"键是不是字符串"（压缩 ops 下数字键
-            // 走的正是位置分支）。接第二种格式时应当改成 ops 级别的询问。
-            const JsonValue::Raw* keyNode = entry.first.as<JsonValue::Raw>();
-            const bool stringKey = keyNode != nullptr && keyNode->is_string();
-            const std::string_view keyText =
-                stringKey ? keyNode->get_ref<const std::string&>() : std::string_view();
             const int32_t entryIndex = static_cast<int32_t>(failed.size());
             DataResult<K> key = keyCodec.parse(ops, entry.first);
             DataResult<V> value = elementCodec.parse(ops, entry.second);
-            if (stringKey) {
-              key = key.addPath(keyText);
-              value = value.addPath(keyText);
-            } else {
-              key = key.addPath(entryIndex);
-              value = value.addPath(entryIndex);
+            // 用键定位出错的条目（非字符串键则用它的位置）。通用代码不再假设
+            // "键是 JSON 字符串"：问 ops（JsonOps 的答案与移植前逐字一致）。
+            // 只有真的出错时才问键文本：成功的 DataResult 会丢掉 path
+            // （addPath 在成功时是恒等），所以正常路径不付这次字符串拷贝。
+            if (key.isError() || value.isError()) {
+              if (ops.isStringKey(entry.first)) {
+                const DataResult<std::string> text = ops.getStringValue(entry.first);
+                const std::string_view keyText =
+                    text.result().has_value() ? std::string_view(*text.result()) : std::string_view();
+                key = key.addPath(keyText);
+                value = value.addPath(keyText);
+              } else {
+                key = key.addPath(entryIndex);
+                value = value.addPath(entryIndex);
+              }
             }
             const DataResult<Entry> decoded = key.apply2stable(
                 [](const K& k, const V& v) { return Entry(k, v); }, value);

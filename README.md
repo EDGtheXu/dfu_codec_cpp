@@ -14,9 +14,9 @@ The reference implementation was decompiled from
 — not part of the build and deliberately not versioned — and the script exists so
 the port's provenance can be reproduced.
 
-* Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~4 400 lines, CMake `INTERFACE` target, nothing to build
+* Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~5 000 lines, CMake `INTERFACE` target, nothing to build
 * Comments inside the header are written in **Chinese**; API names, error messages, test names and both READMEs stay English
-* Layered tests: [`test/unit/`](test/unit) (155 cases), [`test/smoke/`](test/smoke) (23 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
+* Layered tests: [`test/unit/`](test/unit) (155 cases), [`test/smoke/`](test/smoke) (23 cases), [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) and the optional TOML layer (14 + 4 + 3 cases, 202 in total) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -52,6 +52,7 @@ DataResult<Value> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, value);
 | C++ | **C++17** (`/std:c++17`, `-std=c++17`) | required (C++20/23 unlock the optional diagnostics below) |
 | [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0 (single header) | `third_party/nlohmann/json.hpp` |
 | [GoogleTest](https://github.com/google/googletest) | 1.17.0 | `third_party/googletest-1.17.0` (tests only) |
+| [tinytoml](https://github.com/mayah/tinytoml) | v0.4 | `third_party/tinytoml` (optional TOML layer only) |
 | CMake | ≥ 3.16, Ninja or MSBuild | build |
 
 The library itself is header-only, so there is nothing to configure — but because
@@ -59,7 +60,7 @@ its comments are Chinese, an MSVC invocation outside this project's CMake target
 needs `/utf-8` (or `/source-charset:utf-8`); the `codec` target already adds it.
 
 ```powershell
-# 1. fetch nlohmann/json + GoogleTest (add -Proxy http://127.0.0.1:7890 if needed)
+# 1. fetch nlohmann/json + GoogleTest + tinytoml (add -Proxy http://127.0.0.1:7890 if needed)
 powershell -File scripts/fetch_deps.ps1 [-Proxy http://127.0.0.1:7890]
 
 # 2. build (uses MSVC via vcvars64.bat) and run the tests
@@ -71,7 +72,7 @@ Or drive CMake directly:
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # all layers, 181 cases
+ctest --test-dir build --output-on-failure   # all layers, 202 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
 
@@ -81,27 +82,31 @@ cmake -S . -B cmake-build-stacktrace -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEC_R
 
 | CMake option | Default | Effect |
 | --- | --- | --- |
-| `CODEC_BUILD_TESTS` | `ON` | build the three test layers |
+| `CODEC_BUILD_TESTS` | `ON` | build the test layers |
 | `CODEC_BUILD_EXAMPLES` | `ON` | build the example programs |
 | `CODEC_WARNINGS_AS_ERRORS` | `OFF` | `/WX`, `-Werror` |
 | `CODEC_RECORD_STACKTRACE` | `OFF` | define `CODEC_RECORD_STACKTRACE`, compile as C++23 and capture `std::stacktrace` per error |
+| `CODEC_BUILD_TOML` | `ON` | build the optional TOML layer (`codec_toml` target + its two test executables); needs `third_party/tinytoml` |
 
-The three test layers are independent executables, so they can also be run
-directly:
+Each test layer is an independent executable, so it can also be run directly:
 
 ```powershell
-build/test/unit/codec_unit_tests.exe     [--gtest_filter=RecordCodecTest.*]
-build/test/smoke/codec_smoke_tests.exe   [--gtest_filter=SmokeTest.*]
-build/test/perf/codec_perf_tests.exe     [--gtest_filter=PerfTest.SmallDocument]  # prints a table
+build/test/unit/codec_unit_tests.exe          [--gtest_filter=RecordCodecTest.*]
+build/test/smoke/codec_smoke_tests.exe        [--gtest_filter=SmokeTest.*]
+build/test/perf/codec_perf_tests.exe          [--gtest_filter=PerfTest.SmallDocument]  # prints a table
+build/test/codec_toml_unit_tests.exe          [--gtest_filter=TomlOpsTest.*]          # TOML layer
+build/test/codec_toml_smoke_tests.exe         [--gtest_filter=TomlRiskDefTest.*]
+build/test/codec_toml_perf_tests.exe          [--gtest_filter=TomlPerfTest.SmallDocument]  # prints a table
 ```
 
 **Running from CLion.** The project is a normal CMake project: open the folder,
 let CLion configure it, and every case shows up in the Run/Debug dropdown —
-`All CTest` runs all three layers, `unit.*` / `smoke.*` / `perf.*` group them, and
-each `TEST(...)` (including each benchmark fixture) can be run or debugged
-individually. The `check` target is also available in the target list. The perf
-layer calibrates its iteration counts and takes ~3.5 s in Release, ~13 s in
-Debug; `ctest -R perf -V` prints its tables.
+`All CTest` runs all layers, `unit.*` / `smoke.*` / `perf.*` / `toml_unit.*` /
+`toml_smoke.*` / `toml_perf.*` group them, and each `TEST(...)` (including each
+benchmark fixture) can be run or debugged individually. The `check` target is also
+available in the target list. Both perf layers calibrate their own iteration counts
+(the JSON layer ~6.4 s, the TOML layer ~5.6 s in Release, about half that in Debug);
+`ctest -R perf -V` prints their tables.
 
 The suite is verified with **MSVC 14.44 (VS2022 / CLion) in Debug** and
 **MSVC 14.50 (VS2026) in Release**.
@@ -115,8 +120,11 @@ The suite is verified with **MSVC 14.44 (VS2022 / CLion) in Debug** and
 > `test/unit/json_test.cpp`. Plainer raw strings such as `R"({"a":1})"` are fine.
 
 CMake options: `CODEC_BUILD_TESTS`, `CODEC_BUILD_EXAMPLES`,
-`CODEC_WARNINGS_AS_ERRORS`. The library target is `codec` (alias `codec::codec`);
-link it and `#include "codec.hpp"`.
+`CODEC_WARNINGS_AS_ERRORS`, `CODEC_RECORD_STACKTRACE`, `CODEC_BUILD_TOML`. The
+library target is `codec` (alias `codec::codec`); link it and `#include
+"codec.hpp"`. The optional TOML layer is the separate `codec_toml` target
+(`#include "codec_toml.hpp"`), which links `codec` and adds tinytoml's include
+directory — the core header never sees tinytoml.
 
 ### Header-only, in one file
 
@@ -151,9 +159,11 @@ any number of translation units is safe and the singletons really are shared:
   from anywhere else;
 * eight further TUs include it as the only library header.
 
-The only compile-time dependency is [nlohmann/json](#the-json-value-type) (a
-single header in `third_party/`, or your own copy on the include path); the tests
-additionally need GoogleTest, which the `INTERFACE` target does not propagate.
+The core header's only compile-time dependency is
+[nlohmann/json](#the-json-value-type) (a single header in `third_party/`, or your own
+copy on the include path); the tests additionally need GoogleTest, which the
+`INTERFACE` target does not propagate. The optional TOML layer adds exactly one more:
+tinytoml, and only for `codec_toml` — see [the TOML layer](#the-toml-layer-codec_tomlhpp-optional).
 
 ### The JSON value type
 
@@ -174,11 +184,12 @@ readable while applications keep full access:
 
 Above `JsonValue` sits the ops layer's own value type, `codec::Value`: a
 format-neutral handle (shared owner + node pointer + type tag) that every
-`DynamicOps` implementation exchanges, so a second format's ops (TOML, NBT) can
-plug into the same codecs. With `JsonOps` the payload is a `JsonValue` node, so
-`value.asJson()` is the way back — and the erasure costs nothing measurable: the
-2-risk codec decode measured 15 423 ns against the 15 500 ns it had before the
-change (see §7 and [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)).
+`DynamicOps` implementation exchanges, so a second format's ops plugs into the
+same codecs unchanged — which is exactly what the TOML layer below does. With
+`JsonOps` the payload is a `JsonValue` node, so `value.asJson()` is the way back —
+and the erasure costs nothing measurable: the 2-risk codec decode measured 15 423 ns
+against the 15 500 ns it had before the change (see §7 and
+[`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)).
 
 `codec::Dynamic` pairs a value with the ops that understands it, which is what
 `codecs::Passthrough` carries (`Codec<Dynamic>`): a raw dynamic value is meaningless
@@ -195,6 +206,78 @@ value.get("missing").has_value();                        // false
 Values are immutable once built; build new documents through
 `JsonValue::object(...)`, `JsonValue::array(...)` or nlohmann directly.
 
+### The TOML layer (`codec_toml.hpp`, optional)
+
+`JsonOps` is not special any more: since the ops layer exchanges the format-neutral
+`Value`, a second format is one more `DynamicOps` and nothing else.
+[`include/codec_toml.hpp`](include/codec_toml.hpp) is that ops for TOML, built on
+[tinytoml](https://github.com/mayah/tinytoml) (vendored in `third_party/tinytoml`),
+and **the same codecs decode both formats**:
+
+```cpp
+#include "codec_toml.hpp"
+
+const DataResult<TomlDocument> document = codec::parseToml(text);
+const DataResult<RiskDocument> risks =
+    RiskDocumentCodec.parse(codec::TomlOps::INSTANCE, document.result()->root());
+
+// ... and back out again (a TOML document always has a table at the root).
+const DataResult<std::string> encoded = codec::dumpToml(encodedValue.result());
+```
+
+`TomlDocument` owns the parsed `toml::Value` (shared, like `JsonValue` owns its
+document); `parseToml` reports tinytoml's own message (`Error: line 2: Invalid
+token`), so a parse failure still carries a line number. `TomlOps::INSTANCE`
+implements the whole `DynamicOps` surface — including `convertTo`, so values can be
+moved between JSON and TOML in either direction (`JsonOps::INSTANCE.convertTo(
+TomlOps::INSTANCE, value)` and back), which is what makes `Dynamic`/`Passthrough`
+payloads portable across formats.
+
+Type mapping (tinytoml → `codec::Value`):
+
+| TOML | `DynamicOps` view | Reads as | Notes |
+| --- | --- | --- | --- |
+| `INT_TYPE` | number | `getNumberValue` (int) | tinytoml's `int64_t` |
+| `DOUBLE_TYPE` | number | `getNumberValue` (double) | written back as `1.500000` |
+| `BOOL_TYPE` | boolean | `getBooleanValue` | **not** a number — unlike `JsonOps`, which reads `true` as `1` (DFU's Gson behaviour) |
+| `STRING_TYPE` | string | `getStringValue` | |
+| `TIME_TYPE` | string | `getStringValue` | rendered, e.g. `1979-05-27T07:32:00Z`; not a number |
+| `ARRAY_TYPE` | list | `getStream` / `getList` | must be homogeneous to be written back |
+| `TABLE_TYPE` | map | `getMap` | keys are looked up with `findChild`, so a literal `"a.b"` is never treated as a path |
+
+Two deliberate `TomlOps`/`JsonOps` differences are pinned by tests rather than
+hidden: `valueEquals` is type-strict (`1 != 1.0`, while Gson's numbers compare
+equal) and `mergeToMap` with a non-string key is an error (`key is not a string: 1`,
+after the DFU `createMap`-skips / `mergeToMap`-errors split).
+
+**Limits of this layer** (all of them tinytoml v0.4, not the port):
+
+* **dotted keys are rejected at parse** (`a.b = 1` is an error); a *quoted* key
+  `"a.b"` is a literal key and works, because `TomlOps` looks keys up by direct
+  child rather than by path;
+* arrays must be **homogeneous**, local times (`07:32:00`) are unsupported, and
+  local dates come back normalised to UTC date-times;
+* keys are written **sorted** (tinytoml stores a `std::map`), so re-encoding is not
+  byte-identical to the input — decode → encode is stable, the file is not;
+* `null` has no TOML counterpart: `dumpToml` rejects it and names the key. Use
+  `optionalFieldOf` when a field may be absent (an absent key is simply not written);
+* **codec errors carry the codec path, not TOML line/column numbers**
+  (`risks[3].condition.op: expected string, got number`), because tinytoml keeps no
+  source positions for values; only its parse errors have a line number;
+* a scalar or a list at the root cannot be written (`must be a table at the root`) —
+  a TOML document is a table, and the writer validates before rendering rather than
+  emitting something that cannot be parsed back.
+
+Costs, measured (§7): encoding is **linear** — the 2-risk sample encodes in ~24 µs and
+a 400-risk document (413 KB of TOML) in ~4.1–4.4 ms — because `TomlOps` uses its own
+mutable-accumulator builders rather than the generic ones that call
+`mergeToList`/`mergeToMap` per element (those copy the whole container per call).
+`dumpToml` is ~2.6 ms for the 400-risk document, and tinytoml's parser is roughly 4×
+slower than nlohmann's (≈45 µs vs ≈12 µs for ~2 KB).
+
+The layer is on by default (`CODEC_BUILD_TOML=ON`) but entirely separate: configure
+with `-DCODEC_BUILD_TOML=OFF` and nothing in the project needs tinytoml.
+
 ## 2. Layout
 
 ```
@@ -207,6 +290,8 @@ include/codec.hpp      the entire library, in eight commented sections:
                          6 codec         Encoder, Decoder, MapEncoder, MapDecoder, Codec, MapCodec
                          7 codecs        primitive + composite codecs, range checks, recursive, dispatch
                          8 record_codec  RecordCodecBuilder: record<>, fieldOf, optionalFieldOf, forGetter
+include/codec_toml.hpp optional TOML layer: TomlDocument, parseToml, TomlOps, dumpToml
+                       (one more DynamicOps; needs third_party/tinytoml, never included by codec.hpp)
 models/risk_def.hpp    the risk-definition use case (codecs for RiskDef/Condition)
 test/
   CMakeLists.txt       defines the layers + the one-click `check` target
@@ -214,9 +299,11 @@ test/
   unit/                codec_unit_tests   -- component level suites (incl. the ODR guard)
   smoke/               codec_smoke_tests  -- end-to-end API checks
   perf/                codec_perf_tests   -- codec vs nlohmann/json measurements
+  unit/toml_ops_test.cpp, smoke/toml_risk_def_test.cpp, perf/toml_perf_test.cpp
+                       -- the TOML layer's three executables
 examples/              risk_def_main.cpp
 reference/dfu-6.0.8/   decompiled Java original (study only)
-third_party/           nlohmann/json, googletest
+third_party/           nlohmann/json, googletest, tinytoml
 scripts/               fetch_deps.ps1, build.ps1
 ```
 
@@ -228,8 +315,11 @@ scripts/               fetch_deps.ps1, build.ps1
 | `Encoder<A>`, `Decoder<A>`, `MapEncoder<A>`, `MapDecoder<A>` | same four wrappers, same combinators |
 | `Codec.of(encoder, decoder)` / `MapCodec.of(...)` | identical factories |
 | `MapCodec.MapCodecCodec` | `Codec` created from a `MapCodec` (implicit conversion, `Codec::mapCodec()` detects it) |
-| `DynamicOps<T>` (`T` = `JsonElement`) | abstract `DynamicOps` over the single `JsonValue` |
+| `DynamicOps<T>` (`T` = `JsonElement`, `NbtTag`, …) | abstract `DynamicOps` over the format-neutral `Value`; `JsonOps` (nlohmann) and `TomlOps` (`codec_toml.hpp`) implement it |
+| `DynamicOps.convertTo(otherOps, value)` | same, and a real conversion: `JsonOps` ⇄ `TomlOps` in either direction |
+| `Dynamic<T>` | `codec::Dynamic`: a `Value` plus the ops that understands it (`Passthrough` carries one) |
 | `JsonOps.INSTANCE` / `JsonOps.COMPRESSED` | `JsonOps::INSTANCE` / `JsonOps::COMPRESSED` |
+| `JsonOps` (Gson-backed) | `JsonOps` over `JsonValue` (nlohmann/`ordered_json`-backed), plus `TomlOps` over tinytoml |
 | `DataResult<R>` (`Either<R, PartialResult<R>>`) | `DataResult<R>` (optional value + optional error, partial value kept) |
 | `Lifecycle` | `Lifecycle` (same `add` rules) |
 | `RecordCodecBuilder.create(i -> i.group(f1, f2).apply(i, Ctor::new))` | `record<O>(f1, f2)` or `record<O>(ctor, f1, f2)` |
@@ -239,7 +329,7 @@ scripts/               fetch_deps.ps1, build.ps1
 | `codec.dispatch` / `partialDispatch` / `dispatchMap` | same names (`KeyDispatchCodec`) |
 | `Codec.intRange` / `floatRange` / `doubleRange` | same names |
 | `Codec.checkRange` | inlined into the range codecs |
-| `Stream<T>` in `DynamicOps` | `std::vector<JsonValue>` (materialised) |
+| `Stream<T>` in `DynamicOps` | `std::vector<Value>` (materialised) |
 | `Optional<T>` | `std::optional<T>` |
 | `Pair<A, B>` | `std::pair<A, B>` |
 | `Either<L, R>` | `codec::Either<L, R>` (variant-backed) |
@@ -251,14 +341,16 @@ The port implements: primitive codecs (`Bool`, `Byte`, `Short`, `Int`, `Long`,
 `FieldDecoder`, `RecordCodecBuilder`, `KeyDispatchCodec`, `SimpleMapCodec`'s
 key-compression machinery (`KeyCompressor`, compressed record/list builders),
 `Lifecycle`, `DataResult` (incl. `apply2`/`apply2stable`/`apply3`,
-`promotePartial`, `setPartial`, `mapError`, `resultOrPartial`, `getOrThrow`) and
+`promotePartial`, `setPartial`, `mapError`, `resultOrPartial`, `getOrThrow`),
+`Dynamic` (the value + ops pair, which is what `Passthrough` carries) and
 the full `Codec`/`MapCodec` combinator surface (`xmap`, `flatXmap`,
 `comapFlatMap`, `flatComapMap`, `orElse`, `orElseGet`, `mapResult`, `withLifecycle`,
 `stable`, `deprecated`, `fieldOf`, `optionalFieldOf`, `promotePartial`).
 
 Out of scope (DFU packages that build *on* Codec): `DataFixer`, `Schema`,
-`TypeRewriteRule`, the optics/profunctor machinery and `NbtOps`/`Dynamic`
-wrappers.
+`TypeRewriteRule`, the optics/profunctor machinery and `NbtOps` (the TOML ops lives
+in `codec_toml.hpp` instead, and shows what an `NbtOps` would cost: one more
+`DynamicOps`).
 
 ### Scalar conversions (enum, number, string)
 
@@ -519,7 +611,9 @@ Intentional deviations and additions, all documented in the headers:
 
 | Area | DFU | Port | Why |
 | --- | --- | --- | --- |
-| `DynamicOps` value type | generic `T` (JsonElement, NbtTag, …) | a type-erased `Value` handle (owner + node + tag), plus `Dynamic` (value + its ops) as the `Passthrough` carrier | the ops layer is format-neutral now; `JsonValue` is the JSON DOM behind `JsonOps`, and `convertTo` becomes a real conversion once a second ops exists (see [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)) |
+| `DynamicOps` value type | generic `T` (JsonElement, NbtTag, …) | a type-erased `Value` handle (owner + node + tag), plus `Dynamic` (value + its ops) as the `Passthrough` carrier | the ops layer is format-neutral; `JsonValue` is the JSON DOM behind `JsonOps` and `TomlDocument`/`TomlOps` (in `codec_toml.hpp`) the TOML one, and `convertTo` is a real conversion between them (see [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)) |
+| A second `DynamicOps` | one per format inside DFU (`JsonOps`, `NbtOps`) | `JsonOps` in the core header; `TomlOps` in the optional `codec_toml.hpp`, not linked by `codec` | proves the erasure really is format-neutral, and keeps tinytoml out of the core header |
+| `JsonOps.valueEquals` (numbers) | Gson numbers compare by value | unchanged: `1 == 1.0` | faithfulness; `TomlOps` is type-strict instead (`1 != 1.0`), because tinytoml's `operator==` is |
 | `Stream<T>` | lazy Java streams | `std::vector` | no lazy streams in the standard library |
 | `KeyCompressor.compress` | unknown key → `0` (fastutil default) | unknown key → `-1` → treated as absent | avoids silently reading index 0 |
 | `UnboundedMapCodec` duplicates | `ImmutableMap.Builder` throws | last-wins, insertion order kept | keeps decoding usable |
@@ -536,9 +630,9 @@ Intentional deviations and additions, all documented in the headers:
 
 ## 6. Test layers
 
-181 GoogleTest cases in three independent executables. `ctest` prefixes each case
-with its layer (`unit.*`, `smoke.*`, `perf.*`), so any layer can be selected as a
-group.
+202 GoogleTest cases in six independent executables. `ctest` prefixes each case
+with its layer (`unit.*`, `smoke.*`, `perf.*`, `toml_unit.*`, `toml_smoke.*`,
+`toml_perf.*`), so any layer can be selected as a group.
 
 **`test/unit/` → `codec_unit_tests` (155 cases)** — component level, exhaustive
 on edge cases:
@@ -577,6 +671,19 @@ only assertions are that all strategies produce the same result):
 
 Shared helpers live in `test/support/test_support.hpp` (JSON parsing, `decode` /
 `encode` / `decodeError` wrappers that fail the test with the codec message).
+
+**The TOML layer has its own executables** (built only when `CODEC_BUILD_TOML=ON`, so
+the core layers stay free of the tinytoml dependency):
+
+| File | Focus |
+| --- | --- |
+| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests` (14 cases) | `TomlOps` as a `DynamicOps`: scalar reads by type, `BooleanIsNotANumber`, dates as strings, literal `"a.b"` keys via `findChild`, type-strict equality, `convertTo` both ways (and same-ops identity), `dumpToml` rejecting non-table roots / `null` / mixed arrays, parse errors carrying `line 2`, the v0.4 limits (dotted keys, mixed arrays, local time), empty document, list/map merging with strict keys, and the encoding builders (`TomlListBuilder`/`TomlRecordBuilder`): prefix merging without mutating the prefix, accumulator reuse, last-wins on duplicate keys, error propagation through `add`/`withErrorsFrom`/`mapError`, non-string keys, foreign (JSON) handles |
+| `smoke/toml_risk_def_test.cpp` → `codec_toml_smoke_tests` (4 cases) | the *same* `RiskDocumentCodec` on TOML and JSON (identical decoded values), dump → reparse stability, a `Passthrough` `Dynamic` moving JSON → TOML → JSON, TOML values converted back to JSON |
+| `perf/toml_perf_test.cpp` → `codec_toml_perf_tests` (3 cases) | the TOML layer's cost: `parseToml`, parse + decode, pre-parsed decode, encode, encode + `dumpToml`, both `convertTo` directions, and `per-risk encode` — the guard against encoding sliding back to the generic builders (see §7) |
+
+The TOML perf layer is a separate executable on purpose: adding cases to
+`codec_perf_tests` would perturb the JSON numbers it has recorded (code layout alone
+is worth ~3 %, see §7) and would drag tinytoml into the core perf binary.
 
 ## 7. Performance: Codec vs nlohmann/json
 
@@ -631,6 +738,18 @@ scaled down to 40 risks so the layer stays fast (~3 s); the ratios are unchanged
 > `--gtest_filter=PerfTest.LargeDocument` alone, codec decode measures ~4.8 ms
 > instead of ~7.0 ms. Rerun locally before drawing conclusions; the harness is
 > there for relative comparisons, not for absolute claims.
+>
+> **A single row is also sensitive to code layout.** Rebuilding the *identical*
+> source with one extra, never-called translation unit moved `codec decode
+> (pre-parsed)` by 1.9 %, and a two-binary A/B of the same perf source against two
+> revisions of `include/codec.hpp` spread that row over 3.4 % — while the parser row
+> (byte-identical code) moved 4.7 % in the *opposite* direction. So prefer the
+> end-to-end `parse + decode` row, and compare same-run ratios rather than one row
+> across two binaries; the experiment is written up in
+> [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md) §4.3. A re-measurement
+> during the TOML work (same machine, later day) put `ordered_json::parse` at
+> 11.5–11.8 µs and the pre-parsed decode at 15.7–16.0 µs: the parser moved ~9 %, the
+> decode ~2 %.
 >
 > **The annotations are free on the success path.** Paths and codec frames (§3) are
 > materialised only while an error travels outwards, so adding them did not change
@@ -734,3 +853,41 @@ implementation was *less* faithful than DFU rather than merely slower:
 Both were correctness-of-design issues (the port did not behave like DFU under
 scale), not micro-optimisations, and both are covered by the existing tests plus
 the new `perf.StrategiesAgreeOnTheFixture` equivalence check.
+
+### The same trap, once more: the TOML layer
+
+The second `DynamicOps` walked into it too, and acceptance caught it: `TomlOps`
+initially left `listBuilder()`/`mapBuilder()` at their generic defaults, which call
+`mergeToList`/`mergeToMap` once per element — and the TOML versions of those copy
+the whole accumulated `toml::Array`/`toml::Table` on every call, so **encoding was
+quadratic**: 400 risks took **248 ms** (each doubling of N quadrupled the time),
+while `dumpToml` stayed linear at 1.8 ms. `TomlOps` now has TOML-side mutable
+accumulators (`TomlListBuilder`/`TomlRecordBuilder`, same shape and error semantics
+as `JsonOps`' `ArrayListBuilder`/`StringRecordBuilder`), and `mergeToList`/
+`mergeToMap` keep their DFU per-call-copy semantics for direct calls.
+
+Measured with `test/perf/toml_perf_test.cpp` and a scaling bench (best of 5, Release,
+milliseconds); `N` doubling now doubles the time across the board:
+
+| risks | encode | × | dumpToml | × | parseToml | decode | × |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 25 | 0.24 | — | 0.16 | — | 0.25 | 0.12 | — |
+| 50 | 0.48 | 2.02× | 0.31 | 2.01× | 0.50 | 0.23 | 2.01× |
+| 100 | 1.08 | 2.26× | 0.63 | 2.00× | 1.01 | 0.48 | 2.04× |
+| 200 | 2.17 | 2.01× | 1.30 | 2.06× | 2.17 | 1.16 | 2.44× |
+| 400 | **4.42** | 2.04× | 2.57 | 1.98× | 4.42 | 2.19 | 1.89× |
+
+So a 400-risk document (**413 KB of TOML**) encodes in ~4.4 ms and dumps in ~2.6 ms;
+encoding went from ~248 ms (single measurement; 215–219 ms in a same-process
+best-of-5 A/B) to ~4.1–4.4 ms. The 2-risk sample costs ~24 µs to encode and ~45 µs
+to parse (decode ~15 µs, the same order as `JsonOps`).
+
+Two honest notes about this layer's costs: **tinytoml's parser is roughly 4× slower
+than nlohmann's** on a comparable document (≈45 µs vs ≈12 µs for ~2 KB), and every
+`mergeToList`/`mergeToMap` call remains O(container) by design — the builders are what
+keep the codec path linear, so if you build TOML values by calling `mergeToMap` in your
+own loop, you are the one paying that copy.
+
+Like the JSON side, the TOML perf layer's numbers are printed, never asserted:
+`ctest -R toml_perf -V`, and watch `per-risk encode` (~20 µs/risk for the 400-risk
+fixture) — a slide back to the generic builders shows up there as ~550 µs/risk.

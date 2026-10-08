@@ -21,6 +21,8 @@ option(CODEC_RECORD_STACKTRACE
   "Capture a std::stacktrace for every error (needs C++23; file:line needs debug info)" OFF)
 option(CODEC_BUILD_PROTOTYPE
   "Build the generic-ops design prototype (experiment, not part of the library)" OFF)
+option(CODEC_BUILD_TOML
+  "Build the optional TOML layer (include/codec_toml.hpp) and its tests; needs third_party/tinytoml" ON)
 
 # ---------------------------------------------------------------------------
 # Header-only interface library
@@ -33,6 +35,23 @@ target_include_directories(codec INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
 )
 target_compile_features(codec INTERFACE cxx_std_17)
+
+# ---------------------------------------------------------------------------
+# The optional TOML layer: include/codec_toml.hpp (+ tinytoml).
+# The core (include/codec.hpp) never depends on tinytoml; this target only adds
+# the include directory <toml/toml.h> needs.
+# ---------------------------------------------------------------------------
+if(CODEC_BUILD_TOML)
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytoml/toml/toml.h")
+    message(FATAL_ERROR
+      "tinytoml not found at third_party/tinytoml/toml/toml.h.\n"
+      "Download it, or configure with -DCODEC_BUILD_TOML=OFF.")
+  endif()
+  add_library(codec_toml INTERFACE)
+  target_link_libraries(codec_toml INTERFACE codec)
+  target_include_directories(codec_toml INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytoml")
+endif()
 
 # Optional: record a real C++ stack trace with the standard library's
 # <stacktrace> (C++23).  Off by default because capturing costs on every error;

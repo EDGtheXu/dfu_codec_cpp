@@ -1,5 +1,6 @@
 # Downloads the third-party dependencies of the Codec port:
 #   * nlohmann/json single header  -> third_party/nlohmann/json.hpp
+#   * tinytoml single header       -> third_party/tinytoml/toml/toml.h  (TOML support)
 #   * GoogleTest source release    -> third_party/googletest-1.17.0
 #
 # Usage:
@@ -42,6 +43,29 @@ Get-RemoteFile `
   -Url "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp" `
   -Destination (Join-Path $nlohmannDir "json.hpp") `
   -MinimumBytes 500000
+
+# --- tinytoml (TOML support, see include/codec_toml.hpp) --------------------
+# Header-only, simplified BSD; upstream has no releases, so we pin the header by
+# SHA-256 and refuse to continue if master changes: re-pin deliberately.
+$tinytomlDir = Join-Path $thirdParty "tinytoml"
+$tinytomlTomlDir = Join-Path $tinytomlDir "toml"
+New-Item -ItemType Directory -Force -Path $tinytomlTomlDir | Out-Null
+$tinytomlHeader = Join-Path $tinytomlTomlDir "toml.h"
+Get-RemoteFile `
+  -Url "https://raw.githubusercontent.com/mayah/tinytoml/master/include/toml/toml.h" `
+  -Destination $tinytomlHeader `
+  -MinimumBytes 40000
+Get-RemoteFile `
+  -Url "https://raw.githubusercontent.com/mayah/tinytoml/master/LICENSE" `
+  -Destination (Join-Path $tinytomlDir "LICENSE") `
+  -MinimumBytes 512
+$tinytomlExpected = "C08C1E1F5ABB82C53955350DF6F5E97A34B21C6C31F0A00B86445069C0C7B238"
+$tinytomlActual = (Get-FileHash $tinytomlHeader -Algorithm SHA256).Hash
+if ($tinytomlActual -ne $tinytomlExpected) {
+  throw ("tinytoml master changed: expected SHA-256 $tinytomlExpected, got $tinytomlActual. " +
+         "Review the new upstream header, re-run the tests, then update the pin in this script.")
+}
+Write-Host "  -> $tinytomlHeader (SHA-256 verified)"
 
 # --- GoogleTest ------------------------------------------------------------
 $gtestDir = Join-Path $thirdParty "googletest-1.17.0"
