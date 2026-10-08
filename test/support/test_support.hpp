@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-#include "codec/all.hpp"
+#include "codec.hpp"
 
 namespace codec {
 namespace testing {

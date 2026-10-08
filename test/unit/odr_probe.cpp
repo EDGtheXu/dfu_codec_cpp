@@ -1,6 +1,6 @@
-// A *second* translation unit that includes the whole library plus the models
-// header.  The unit test binary therefore contains every inline definition twice,
-// which is exactly the situation a header-only library has to survive:
+// A *second* translation unit that includes the single library header plus the
+// models header.  The unit test binary therefore contains every inline definition
+// twice, which is exactly the situation a header-only library has to survive:
 //
 //   * a definition that is missing `inline` makes the linker report a duplicate
 //     symbol (LNK2005 / "multiple definition") before any test runs;
@@ -9,7 +9,7 @@
 //     addresses with the ones it sees itself.
 #include <string>
 
-#include "codec/all.hpp"
+#include "codec.hpp"
 #include "risk_def.hpp"
 
 namespace codec_odr {

@@ -18,7 +18,7 @@
 #include <utility>
 #include <vector>
 
-#include "codec/all.hpp"
+#include "codec.hpp"
 
 namespace risk {
 

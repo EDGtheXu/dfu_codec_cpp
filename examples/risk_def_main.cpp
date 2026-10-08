@@ -8,7 +8,7 @@
 #include <sstream>
 #include <string>
 
-#include "codec/all.hpp"
+#include "codec.hpp"
 #include "risk_def.hpp"
 
 namespace {

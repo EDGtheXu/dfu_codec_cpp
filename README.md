@@ -14,13 +14,13 @@ The reference implementation was decompiled from
 — not part of the build and deliberately not versioned — and the script exists so
 the port's provenance can be reproduced.
 
-* Header-only library: [`include/codec/`](include/codec) (CMake `INTERFACE` target, no sources to build)
-* Layered tests: [`test/unit/`](test/unit) (117 cases), [`test/smoke/`](test/smoke) (21 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
+* Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~3 700 lines, CMake `INTERFACE` target, nothing to build
+* Layered tests: [`test/unit/`](test/unit) (118 cases), [`test/smoke/`](test/smoke) (21 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
 ```cpp
-#include "codec/all.hpp"
+#include "codec.hpp"
 
 struct RiskDef {
   std::string id;
@@ -64,7 +64,7 @@ Or drive CMake directly:
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # all layers, 141 cases
+ctest --test-dir build --output-on-failure   # all layers, 142 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
 ```
@@ -99,13 +99,13 @@ The suite is verified with **MSVC 14.44 (VS2022 / CLion) in Debug** and
 
 CMake options: `CODEC_BUILD_TESTS`, `CODEC_BUILD_EXAMPLES`,
 `CODEC_WARNINGS_AS_ERRORS`. The library target is `codec` (alias `codec::codec`);
-link it and `#include "codec/all.hpp"`.
+link it and `#include "codec.hpp"`.
 
-### Header-only
+### Header-only, in one file
 
-The library is header-only: `include/codec/` contains nine `.hpp` files and no
-translation units, and the CMake target is an `INTERFACE` library, so there is
-nothing to compile, link, install or keep ABI-compatible — consuming it costs one
+The whole library is [`include/codec.hpp`](include/codec.hpp): no translation
+units, no generated files, and an `INTERFACE` CMake target — so there is nothing
+to compile, link, install or keep ABI-compatible. Consuming it costs one
 `target_link_libraries`:
 
 ```cmake
@@ -113,17 +113,26 @@ add_subdirectory(path/to/Codec)                     # or FetchContent_Declare(..
 target_link_libraries(my_app PRIVATE codec::codec)  # adds include/ + third_party/ + C++17
 ```
 
-Everything at namespace scope is `inline` (functions), a template, or an inline
-variable (`JsonOps::INSTANCE`, `codecs::Int`, ...), so including the headers from
-any number of translation units is safe, and the singletons really are shared:
+The file is organised in eight commented sections in dependency order — `json`,
+`lifecycle`, `data_result`, `dynamic_ops`, `json_ops`, `codec`, `codecs`,
+`record_codec` — so it stays navigable (search for `// 3/8  data_result`), and a
+drop-in copy needs only this file plus nlohmann/json.
 
-* `test/unit/odr_probe.cpp` is a second TU that includes every header (plus
-  `models/risk_def.hpp`), so the unit test binary links all definitions twice —
+Everything at namespace scope is `inline` (functions), a template, or an inline
+variable (`JsonOps::INSTANCE`, `codecs::Int`, ...), so including the header from
+any number of translation units is safe and the singletons really are shared:
+
+* `test/unit/odr_probe.cpp` is a second TU including the header (plus
+  `models/risk_def.hpp`), so the unit test binary links every definition twice —
   a missing `inline` fails the build at link time;
 * `test/unit/odr_test.cpp` compares the addresses of the codecs and of
   `JsonOps::INSTANCE` across the two TUs, which catches a definition that
   silently became translation-unit-local. Swap `inline` for `static` on
-  `codecs::Int` and both tests fail.
+  `codecs::Int` and both tests fail;
+* `test/unit/header_self_contained_test.cpp` includes `codec.hpp` *before* any
+  other header — including GoogleTest — so the header cannot borrow declarations
+  from anywhere else;
+* eight further TUs include it as the only library header.
 
 The only compile-time dependency is [nlohmann/json](#the-json-value-type) (a
 single header in `third_party/`, or your own copy on the include path); the tests
@@ -159,21 +168,20 @@ Values are immutable once built; build new documents through
 ## 2. Layout
 
 ```
-include/codec/
-  json.hpp          JsonValue (nlohmann-backed) + Number (java.lang.Number)
-  lifecycle.hpp     Lifecycle
-  data_result.hpp   DataResult, PartialResult semantics, Unit
-  dynamic_ops.hpp   DynamicOps, MapLike, RecordBuilder, ListBuilder, KeyCompressor
-  json_ops.hpp      JsonOps (INSTANCE / COMPRESSED)
-  codec.hpp         Encoder, Decoder, MapEncoder, MapDecoder, Codec, MapCodec
-  codecs.hpp        primitive + composite codecs, range checks, recursive, dispatch
-  record_codec.hpp  RecordCodecBuilder: record<>, fieldOf, optionalFieldOf, forGetter
-  all.hpp           umbrella header
+include/codec.hpp      the entire library, in eight commented sections:
+                         1 json          JsonValue (nlohmann-backed) + Number (java.lang.Number)
+                         2 lifecycle     Lifecycle
+                         3 data_result   DataResult, PartialResult semantics, Unit
+                         4 dynamic_ops   DynamicOps, MapLike, RecordBuilder, ListBuilder, KeyCompressor
+                         5 json_ops      JsonOps (INSTANCE / COMPRESSED)
+                         6 codec         Encoder, Decoder, MapEncoder, MapDecoder, Codec, MapCodec
+                         7 codecs        primitive + composite codecs, range checks, recursive, dispatch
+                         8 record_codec  RecordCodecBuilder: record<>, fieldOf, optionalFieldOf, forGetter
 models/risk_def.hpp    the risk-definition use case (codecs for RiskDef/Condition)
 test/
   CMakeLists.txt       defines the layers + the one-click `check` target
   support/             shared test helpers (test_support.hpp)
-  unit/                codec_unit_tests   -- component level suites
+  unit/                codec_unit_tests   -- component level suites (incl. the ODR guard)
   smoke/               codec_smoke_tests  -- end-to-end API checks
   perf/                codec_perf_tests   -- codec vs nlohmann/json measurements
 examples/              risk_def_main.cpp
@@ -306,11 +314,11 @@ Intentional deviations, all documented in the headers:
 
 ## 6. Test layers
 
-141 GoogleTest cases in three independent executables. `ctest` prefixes each case
+142 GoogleTest cases in three independent executables. `ctest` prefixes each case
 with its layer (`unit.*`, `smoke.*`, `perf.*`), so any layer can be selected as a
 group.
 
-**`test/unit/` → `codec_unit_tests` (117 cases)** — component level, exhaustive
+**`test/unit/` → `codec_unit_tests` (118 cases)** — component level, exhaustive
 on edge cases:
 
 | File | Focus |
@@ -323,7 +331,8 @@ on edge cases:
 | `codec_combinators_test.cpp` | `xmap`/`flatXmap`/`comapFlatMap`/`flatComapMap`, `orElse`, `mapResult`, `either`, `pair`, `listOf`, `unboundedMap`, ranges, unit codecs, map-codec combinators |
 | `record_codec_test.cpp` | `record<>` in all forms, `fieldOf`/`optionalFieldOf`/`forGetter`, error joining, partial objects, keys, compression |
 | `dispatch_test.cpp` | `KeyDispatchCodec` (`partialDispatch`/`dispatch`/`dispatchMap`), map-codec payload merging, compressed dispatch |
-| `odr_test.cpp` + `odr_probe.cpp` | header-only guarantee: two TUs including every header link together, and the inline singletons have one shared address |
+| `odr_test.cpp` + `odr_probe.cpp` | header-only guarantee: two TUs including the single header link together, and the inline singletons have one shared address |
+| `header_self_contained_test.cpp` | includes `codec.hpp` before every other header, proving the single header stands alone |
 
 **`test/smoke/` → `codec_smoke_tests` (21 cases)** — small and fast end-to-end
 passes that answer "does the port work at all?":
@@ -452,17 +461,19 @@ produce identical structures, so the comparison is apples to apples).
   it would merely replace a battle-tested parser/serializer with a hand-written one
   (the first version of this port had one: ~450 lines that still had to get
   surrogate pairs, UTF-8 validation and shortest-round-trip float printing right).
-* In this port nlohmann is confined to **one file behind one type**:
+* In this port nlohmann is confined to **one section behind one type** — section 1
+  of the single header is the only place that mentions it:
 
   ```powershell
-  > Select-String -Path include/codec/*.hpp -Pattern nlohmann -List | Select-Object Filename
-  include\codec\json.hpp        # the only file that mentions nlohmann
+  > $jsonEnd = (Select-String -Path include/codec.hpp -Pattern '^// 2/8').LineNumber
+  > (Select-String -Path include/codec.hpp -Pattern nlohmann).LineNumber -gt $jsonEnd
+  # -> no output: every nlohmann reference lives in section 1 (lines 30..547)
   ```
 
-  `codec.hpp`, `codecs.hpp`, `record_codec.hpp`, `dynamic_ops.hpp`,
-  `data_result.hpp` and `lifecycle.hpp` only ever see `JsonValue` and
-  `DynamicOps`. Swapping the DOM — or removing the dependency in favour of your own
-  — touches `json.hpp` and `scripts/fetch_deps.ps1` and nothing else.
+  Sections 2–8 (`lifecycle`, `data_result`, `dynamic_ops`, `json_ops`, `codec`,
+  `codecs`, `record_codec`) only ever see `JsonValue` and `DynamicOps`. Swapping the
+  DOM — or removing the dependency in favour of your own — touches section 1 of
+  `codec.hpp` plus `scripts/fetch_deps.ps1` and nothing else.
 * The intermediate DOM is not an accident of using nlohmann either: DFU's
   `DynamicOps<T>`/`MapLike` contract is **random access**. `dispatch` reads the
   type key and then re-decodes *the same map* with the selected codec,

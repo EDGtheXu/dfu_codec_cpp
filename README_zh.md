@@ -11,15 +11,15 @@
 `reference/dfu-6.0.8/`。这些源码属于 Mojang，仅作阅读参考——不参与构建，也刻意
 不纳入版本管理——脚本的作用是让本次移植的来源可复现。
 
-* 仅头文件库：[`include/codec/`](include/codec)（CMake `INTERFACE` 目标，无需编译任何源文件）
-* 分层测试：[`test/unit/`](test/unit)（117 个用例）、[`test/smoke/`](test/smoke)
+* 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 3 700 行，CMake `INTERFACE` 目标，无需编译任何源文件
+* 分层测试：[`test/unit/`](test/unit)（118 个用例）、[`test/smoke/`](test/smoke)
   （21 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
   性能对比）——每层一个独立可执行文件
 * 参考用例（风险定义文档）：[`models/risk_def.hpp`](models/risk_def.hpp)
 * 可运行示例：[`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
 ```cpp
-#include "codec/all.hpp"
+#include "codec.hpp"
 
 struct RiskDef {
   std::string id;
@@ -63,7 +63,7 @@ powershell -File scripts/build.ps1 -RunTests
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 全部测试层，141 个用例
+ctest --test-dir build --output-on-failure   # 全部测试层，142 个用例
 cmake --build build --target check           # 等价的一键目标
 build/examples/risk_def_example.exe          # 可选：示例文档演示
 ```
@@ -94,29 +94,37 @@ Release 下约 3.5 秒、Debug 下约 13 秒；`ctest -R perf -V` 可以打印�
 
 CMake 选项：`CODEC_BUILD_TESTS`、`CODEC_BUILD_EXAMPLES`、
 `CODEC_WARNINGS_AS_ERRORS`。库目标名为 `codec`（别名 `codec::codec`），链接它并
-`#include "codec/all.hpp"` 即可。
+`#include "codec.hpp"` 即可。
 
-### 仅头文件（header-only）
+### 仅头文件，且只有一个文件
 
-本库是纯头文件库：`include/codec/` 下是 9 个 `.hpp`，没有任何翻译单元；CMake 目标
-是 `INTERFACE` 库，因此不需要编译、链接、安装，也不存在 ABI 兼容问题——接入成本就是
-一条 `target_link_libraries`：
+整个库就是 [`include/codec.hpp`](include/codec.hpp)：没有翻译单元、没有生成文件，
+CMake 目标是 `INTERFACE` 库，因此不需要编译、链接、安装，也不存在 ABI 兼容问题。
+接入成本就是一条 `target_link_libraries`：
 
 ```cmake
 add_subdirectory(path/to/Codec)                     # 或用 FetchContent_Declare(...)
 target_link_libraries(my_app PRIVATE codec::codec)  # 附带 include/、third_party/ 与 C++17
 ```
 
+文件内部按依赖顺序划分为 8 个带注释的小节——`json`、`lifecycle`、`data_result`、
+`dynamic_ops`、`json_ops`、`codec`、`codecs`、`record_codec`——因此依然便于导航
+（搜索 `// 3/8  data_result` 即可跳转）；要把库拷进别的工程，只需要这一个文件加上
+nlohmann/json。
+
 命名空间作用域下的一切要么是 `inline` 函数、要么是模板、要么是 inline 变量
-（`JsonOps::INSTANCE`、`codecs::Int` 等），因此可以放心地在任意多个翻译单元里包含这些
+（`JsonOps::INSTANCE`、`codecs::Int` 等），因此可以放心地在任意多个翻译单元里包含这个
 头文件，单例也确实是共享的：
 
-* `test/unit/odr_probe.cpp` 是第二个翻译单元，它包含了全部头文件（外加
+* `test/unit/odr_probe.cpp` 是第二个翻译单元，它包含了这个头文件（外加
   `models/risk_def.hpp`），因此单元测试可执行文件会把所有定义链接两遍——漏写
   `inline` 会直接在链接期失败；
 * `test/unit/odr_test.cpp` 会比较两个翻译单元里看到的 codec 与 `JsonOps::INSTANCE`
   地址，从而抓住"某个定义悄悄变成翻译单元内部链接"的情况。把 `codecs::Int` 前的
-  `inline` 改成 `static`，这两个测试都会失败。
+  `inline` 改成 `static`，这两个测试都会失败；
+* `test/unit/header_self_contained_test.cpp` 在**任何其他头文件之前**（包括
+  GoogleTest）包含 `codec.hpp`，因此这个头文件无法从别处借用任何声明；
+* 另有 8 个翻译单元只包含它这一个库头文件。
 
 唯一的编译期依赖是 [nlohmann/json](#关于-json-值类型)（`third_party/` 下的单头文件，
 也可以换成你自己 include 路径上的副本）；测试额外需要 GoogleTest，而 `INTERFACE`
@@ -149,21 +157,20 @@ value.get("missing").has_value();                        // false
 ## 2. 目录结构
 
 ```
-include/codec/
-  json.hpp          JsonValue（底层为 nlohmann）+ Number（对应 java.lang.Number）
-  lifecycle.hpp     Lifecycle
-  data_result.hpp   DataResult、PartialResult 语义、Unit
-  dynamic_ops.hpp   DynamicOps、MapLike、RecordBuilder、ListBuilder、KeyCompressor
-  json_ops.hpp      JsonOps（INSTANCE / COMPRESSED）
-  codec.hpp         Encoder、Decoder、MapEncoder、MapDecoder、Codec、MapCodec
-  codecs.hpp        基础与组合 codec、范围校验、recursive、dispatch
-  record_codec.hpp  RecordCodecBuilder：record<>、fieldOf、optionalFieldOf、forGetter
-  all.hpp           总头文件
+include/codec.hpp      整个库，按依赖顺序分为 8 个带注释的小节：
+                         1 json          JsonValue（底层为 nlohmann）+ Number（对应 java.lang.Number）
+                         2 lifecycle     Lifecycle
+                         3 data_result   DataResult、PartialResult 语义、Unit
+                         4 dynamic_ops   DynamicOps、MapLike、RecordBuilder、ListBuilder、KeyCompressor
+                         5 json_ops      JsonOps（INSTANCE / COMPRESSED）
+                         6 codec         Encoder、Decoder、MapEncoder、MapDecoder、Codec、MapCodec
+                         7 codecs        基础与组合 codec、范围校验、recursive、dispatch
+                         8 record_codec  RecordCodecBuilder：record<>、fieldOf、optionalFieldOf、forGetter
 models/risk_def.hpp    风险定义用例（RiskDef/Condition 的 codec）
 test/
   CMakeLists.txt       定义各测试层与一键 `check` 目标
   support/             共享测试辅助（test_support.hpp）
-  unit/                codec_unit_tests   -- 组件级测试套件
+  unit/                codec_unit_tests   -- 组件级测试套件（含 ODR 守护）
   smoke/               codec_smoke_tests  -- 端到端 API 检查
   perf/                codec_perf_tests   -- codec 与 nlohmann/json 的性能测量
 examples/              risk_def_main.cpp
@@ -289,10 +296,10 @@ Codec<Condition> conditionCodec() {
 
 ## 6. 测试分层
 
-141 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
+142 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
 前缀（`unit.*`、`smoke.*`、`perf.*`），因此任何一层都可以按组选择运行。
 
-**`test/unit/` → `codec_unit_tests`（117 个用例）**——组件级，覆盖各种边界情况：
+**`test/unit/` → `codec_unit_tests`（118 个用例）**——组件级，覆盖各种边界情况：
 
 | 文件 | 关注点 |
 | --- | --- |
@@ -304,7 +311,8 @@ Codec<Condition> conditionCodec() {
 | `codec_combinators_test.cpp` | `xmap`/`flatXmap`/`comapFlatMap`/`flatComapMap`、`orElse`、`mapResult`、`either`、`pair`、`listOf`、`unboundedMap`、范围校验、unit codec、map codec 组合子 |
 | `record_codec_test.cpp` | 各种形式的 `record<>`、`fieldOf`/`optionalFieldOf`/`forGetter`、错误合并、部分对象、keys、压缩 |
 | `dispatch_test.cpp` | `KeyDispatchCodec`（`partialDispatch`/`dispatch`/`dispatchMap`）、map codec 载荷合并、压缩 dispatch |
-| `odr_test.cpp` + `odr_probe.cpp` | 仅头文件保证：两个包含全部头文件的翻译单元能一起链接，且 inline 单例在两个 TU 中地址一致 |
+| `odr_test.cpp` + `odr_probe.cpp` | 仅头文件保证：两个都包含该单头文件的翻译单元能一起链接，且 inline 单例在两个 TU 中地址一致 |
+| `header_self_contained_test.cpp` | 在其余所有头文件之前包含 `codec.hpp`，证明单头文件可独立编译 |
 
 **`test/smoke/` → `codec_smoke_tests`（21 个用例）**——小而快的端到端检查，回答
 "这个移植到底能不能用"：
@@ -418,17 +426,19 @@ Codec 层付出了 2–3 倍解析代价却没有收益；此时 `get<T>()` 或�
   nlohmann 对同一段文本的解析。去掉 nlohmann 并不会消除这笔开销，只会把经过实战
   检验的解析器/序列化器换成自己写的（本移植的第一版就是如此：约 450 行代码，仍然
   必须正确处理代理对、UTF-8 校验和最短往返浮点输出）。
-* 在本移植中，nlohmann 被限制在**一个文件、一个类型**之后：
+* 在本移植中，nlohmann 被限制在**一个小节、一个类型**之后——单头文件的第 1 节是唯一
+  提到它的地方：
 
   ```powershell
-  > Select-String -Path include/codec/*.hpp -Pattern nlohmann -List | Select-Object Filename
-  include\codec\json.hpp        # 唯一提到 nlohmann 的文件
+  > $jsonEnd = (Select-String -Path include/codec.hpp -Pattern '^// 2/8').LineNumber
+  > (Select-String -Path include/codec.hpp -Pattern nlohmann).LineNumber -gt $jsonEnd
+  # -> 无输出：所有 nlohmann 引用都在第 1 节内（第 30..547 行）
   ```
 
-  `codec.hpp`、`codecs.hpp`、`record_codec.hpp`、`dynamic_ops.hpp`、
-  `data_result.hpp`、`lifecycle.hpp` 只会看到 `JsonValue` 与 `DynamicOps`。要替换
-  DOM——或干脆去掉这个依赖改用自研实现——只需改动 `json.hpp` 与
-  `scripts/fetch_deps.ps1`，其他文件一行都不用动。
+  第 2–8 节（`lifecycle`、`data_result`、`dynamic_ops`、`json_ops`、`codec`、
+  `codecs`、`record_codec`）只会看到 `JsonValue` 与 `DynamicOps`。要替换 DOM——或
+  干脆去掉这个依赖改用自研实现——只需改动 `codec.hpp` 的第 1 节与
+  `scripts/fetch_deps.ps1`，其他部分一行都不用动。
 * 中间的 DOM 也不是"用了 nlohmann"才产生的：DFU 的 `DynamicOps<T>`/`MapLike` 契约
   本身就是**随机访问**的。`dispatch` 先读类型键，再用选中的 codec 对*同一个 map*
   重新解码；`ListCodec` 把失败的原始元素作为部分结果返回；`unboundedMap` 消费

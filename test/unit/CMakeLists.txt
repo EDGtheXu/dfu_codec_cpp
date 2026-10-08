@@ -12,6 +12,7 @@ add_executable(codec_unit_tests
   codec_combinators_test.cpp
   record_codec_test.cpp
   dispatch_test.cpp
+  header_self_contained_test.cpp   # includes codec.hpp before anything else
   odr_test.cpp
   odr_probe.cpp          # second TU: guards the header-only property
 )
