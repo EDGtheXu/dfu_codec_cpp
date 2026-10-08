@@ -14,14 +14,18 @@ The reference implementation was decompiled from
 — not part of the build and deliberately not versioned — and the script exists so
 the port's provenance can be reproduced.
 
-* Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~5 000 lines, CMake `INTERFACE` target, nothing to build
-* Comments inside the header are written in **Chinese**; API names, error messages, test names and both READMEs stay English
-* Layered tests: [`test/unit/`](test/unit) (155 cases), [`test/smoke/`](test/smoke) (23 cases), [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) and the optional TOML layer (15 + 4 + 3 cases, 203 in total) — one executable each
+* **One entry header per format**, `include` and go:
+  * [`include/codec.hpp`](include/codec.hpp) — **the core** (~4 000 lines): the erased value handle, the `DynamicOps`/`MapLike`/builder interfaces, the `Codec`/`MapCodec` layer, `DataResult`/`Lifecycle`, diagnostics and `Number`. **No format, no serialisation library** — it builds on a machine with no JSON library at all.
+  * [`include/codec_json.hpp`](include/codec_json.hpp) — JSON: `JsonValue` (a reference-semantics handle over nlohmann/json), `JsonParseError`, `JsonOps` (`INSTANCE` / `COMPRESSED`).
+  * [`include/codec_toml.hpp`](include/codec_toml.hpp) — TOML: `TomlDocument`, `parseToml`, `TomlOps`, `dumpToml`.
+  Adding a format is one more `DynamicOps` + one entry header: see [`docs/adding_a_format.md`](docs/adding_a_format.md).
+* Comments inside the headers are written in **Chinese**; API names, error messages, test names and both READMEs stay English
+* Layered tests: [`test/unit/`](test/unit) (155 cases), [`test/smoke/`](test/smoke) (23 cases), [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark), the optional TOML layer (15 + 4 + 3 cases) and its JSON-free core coverage — 203 in total, one executable per layer
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
 ```cpp
-#include "codec.hpp"
+#include "codec_json.hpp"   // the JSON entry header (pulls in the core)
 
 struct RiskDef {
   std::string id;
@@ -39,21 +43,21 @@ Codec<RiskDef> RiskDefCodec = record<RiskDef>(
 // decode / encode
 DataResult<RiskDef> decoded = RiskDefCodec.parse(JsonOps::INSTANCE, JsonValue::parse(text));
 DataResult<Value> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, value);
-// `Value` is the format-neutral handle the ops layer exchanges; with JsonOps,
-// `encoded.result()->asJson()` gives the JSON node back.
+// `Value` is the format-neutral handle the ops layer exchanges; on the JSON side,
+// `jsonView(*encoded.result())` gives the JSON node back (the core has no JSON name).
 ```
 
 ---
 
 ## 1. Dependencies and build
 
-| Dependency | Version | Where |
-| --- | --- | --- |
-| C++ | **C++17** (`/std:c++17`, `-std=c++17`) | required (C++20/23 unlock the optional diagnostics below) |
-| [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0 (single header) | `third_party/nlohmann/json.hpp` |
-| [GoogleTest](https://github.com/google/googletest) | 1.17.0 | `third_party/googletest-1.17.0` (tests only) |
-| [tinytoml](https://github.com/mayah/tinytoml) | v0.4 | `third_party/tinytoml` (optional TOML layer only) |
-| CMake | ≥ 3.16, Ninja or MSBuild | build |
+| Dependency | Version | Where | Needed by |
+| --- | --- | --- | --- |
+| C++ | **C++17** (`/std:c++17`, `-std=c++17`) | required (C++20/23 unlock the optional diagnostics below) | everything |
+| [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0 (single header) | `third_party/nlohmann/json.hpp` | `codec_json.hpp` only — optional |
+| [tinytoml](https://github.com/mayah/tinytoml) | v0.4 | `third_party/tinytoml` | `codec_toml.hpp` only — optional |
+| [GoogleTest](https://github.com/google/googletest) | 1.17.0 | `third_party/googletest-1.17.0` | tests only |
+| CMake | ≥ 3.16, Ninja or MSBuild | build | build |
 
 The library itself is header-only, so there is nothing to configure — but because
 its comments are Chinese, an MSVC invocation outside this project's CMake target
@@ -76,6 +80,10 @@ ctest --test-dir build --output-on-failure   # all layers, 203 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
 
+# only the core + TOML, on a machine that has no JSON library at all:
+cmake -S . -B build-nojson -G Ninja -DCMAKE_BUILD_TYPE=Release -DCODEC_BUILD_JSON=OFF
+cmake --build build-nojson && ctest --test-dir build-nojson   # 18 cases (TOML unit + perf)
+
 # optional: also capture a real std::stacktrace for every error (switches to C++23)
 cmake -S . -B cmake-build-stacktrace -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEC_RECORD_STACKTRACE=ON
 ```
@@ -83,19 +91,20 @@ cmake -S . -B cmake-build-stacktrace -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEC_R
 | CMake option | Default | Effect |
 | --- | --- | --- |
 | `CODEC_BUILD_TESTS` | `ON` | build the test layers |
-| `CODEC_BUILD_EXAMPLES` | `ON` | build the example programs |
+| `CODEC_BUILD_EXAMPLES` | `ON` | build the example programs (needs the JSON layer) |
 | `CODEC_WARNINGS_AS_ERRORS` | `OFF` | `/WX`, `-Werror` |
 | `CODEC_RECORD_STACKTRACE` | `OFF` | define `CODEC_RECORD_STACKTRACE`, compile as C++23 and capture `std::stacktrace` per error |
-| `CODEC_BUILD_TOML` | `ON` | build the optional TOML layer (`codec_toml` target + its two test executables); needs `third_party/tinytoml` |
+| `CODEC_BUILD_JSON` | `ON` | build the JSON entry header (`codec_json` target + the JSON test layers); needs `third_party/nlohmann/json.hpp` |
+| `CODEC_BUILD_TOML` | `ON` | build the TOML entry header (`codec_toml` target + its test executables); needs `third_party/tinytoml` |
 
 Each test layer is an independent executable, so it can also be run directly:
 
 ```powershell
-build/test/unit/codec_unit_tests.exe          [--gtest_filter=RecordCodecTest.*]
+build/test/unit/codec_unit_tests.exe          [--gtest_filter=RecordCodecTest.*]     # JSON layer
 build/test/smoke/codec_smoke_tests.exe        [--gtest_filter=SmokeTest.*]
 build/test/perf/codec_perf_tests.exe          [--gtest_filter=PerfTest.SmallDocument]  # prints a table
-build/test/codec_toml_unit_tests.exe          [--gtest_filter=TomlOpsTest.*]          # TOML layer
-build/test/codec_toml_smoke_tests.exe         [--gtest_filter=TomlRiskDefTest.*]
+build/test/codec_toml_unit_tests.exe          [--gtest_filter=TomlOpsTest.*]          # TOML layer (JSON-free)
+build/test/codec_toml_smoke_tests.exe         [--gtest_filter=TomlRiskDefTest.*]      # JSON <-> TOML cross-format
 build/test/codec_toml_perf_tests.exe          [--gtest_filter=TomlPerfTest.SmallDocument]  # prints a table
 ```
 
@@ -104,9 +113,10 @@ let CLion configure it, and every case shows up in the Run/Debug dropdown —
 `All CTest` runs all layers, `unit.*` / `smoke.*` / `perf.*` / `toml_unit.*` /
 `toml_smoke.*` / `toml_perf.*` group them, and each `TEST(...)` (including each
 benchmark fixture) can be run or debugged individually. The `check` target is also
-available in the target list. Both perf layers calibrate their own iteration counts
-(the JSON layer ~6.4 s, the TOML layer ~5.6 s in Release, about half that in Debug);
-`ctest -R perf -V` prints their tables.
+available in the target list (it depends only on the layers that are configured).
+Both perf layers calibrate their own iteration counts (the JSON layer ~6.4 s, the
+TOML layer ~5.6 s in Release, about half that in Debug); `ctest -R perf -V` prints
+their tables.
 
 The suite is verified with **MSVC 14.44 (VS2022 / CLion) in Debug** and
 **MSVC 14.50 (VS2026) in Release**.
@@ -119,29 +129,47 @@ The suite is verified with **MSVC 14.44 (VS2022 / CLion) in Debug** and
 > (`const std::string text = R"(...)"; EXPECT_EQ(f(text), ...)`) — see
 > `test/unit/json_test.cpp`. Plainer raw strings such as `R"({"a":1})"` are fine.
 
-CMake options: `CODEC_BUILD_TESTS`, `CODEC_BUILD_EXAMPLES`,
-`CODEC_WARNINGS_AS_ERRORS`, `CODEC_RECORD_STACKTRACE`, `CODEC_BUILD_TOML`. The
-library target is `codec` (alias `codec::codec`); link it and `#include
-"codec.hpp"`. The optional TOML layer is the separate `codec_toml` target
-(`#include "codec_toml.hpp"`), which links `codec` and adds tinytoml's include
-directory — the core header never sees tinytoml.
+### One entry header per format
 
-### Header-only, in one file
-
-The whole library is [`include/codec.hpp`](include/codec.hpp): no translation
-units, no generated files, and an `INTERFACE` CMake target — so there is nothing
-to compile, link, install or keep ABI-compatible. Consuming it costs one
-`target_link_libraries`:
+Link the target of the format you use; each one adds the include path its own
+library needs, and **the core target carries none**:
 
 ```cmake
-add_subdirectory(path/to/Codec)                     # or FetchContent_Declare(...)
-target_link_libraries(my_app PRIVATE codec::codec)  # adds include/ + third_party/ + C++17
+add_subdirectory(path/to/Codec)                      # or FetchContent_Declare(...)
+target_link_libraries(my_app PRIVATE codec::json)    # include/ + third_party/ + C++17, #include "codec_json.hpp"
+target_link_libraries(my_app PRIVATE codec::toml)    # include/ + tinytoml,          #include "codec_toml.hpp"
+target_link_libraries(my_app PRIVATE codec::codec)   # include/ only: the core, no format
 ```
 
-The file is organised in eight commented sections in dependency order — `json`,
-`lifecycle`, `data_result`, `dynamic_ops`, `json_ops`, `codec`, `codecs`,
-`record_codec` — so it stays navigable (search for `// 3/8  data_result`), and a
-drop-in copy needs only this file plus nlohmann/json.
+* `codec` (alias `codec::codec`) — the core: `Value`, `DynamicOps`, `Codec`/`MapCodec`,
+  `DataResult`/`Lifecycle`, diagnostics, `Number`. Everything in it is
+  format-neutral, which is checked by a grep assertion in this repository
+  (`include/codec.hpp` contains the strings `JsonValue` and `nlohmann` exactly zero
+  times) and by the `-DCODEC_BUILD_JSON=OFF` build that compiles and runs the TOML
+  tests with `third_party/nlohmann/json.hpp` renamed away.
+* `codec_json` (alias `codec::json`) — `#include "codec_json.hpp"`: `JsonValue`,
+  `JsonParseError`, `JsonOps` (`INSTANCE` / `COMPRESSED`), plus the two interop
+  entry points the core cannot have: `JsonValue::operator Value()` (implicit, so
+  `codec.parse(JsonOps::INSTANCE, JsonValue::parse(text))` still reads the same) and
+  `jsonView(const Value&)`, which returns the JSON node of a handle.
+* `codec_toml` (alias `codec::toml`) — `#include "codec_toml.hpp"`: `TomlDocument`,
+  `parseToml`, `TomlOps::INSTANCE`, `dumpToml`. It only includes `codec.hpp` and
+  tinytoml.
+
+The core header never includes an entry header (an umbrella header would drag
+nlohmann back into a core-only build), and an entry header never includes another
+format's.
+
+### Header-only, one file per format
+
+Nothing to compile, link, install or keep ABI-compatible: every entry header is a
+single file and an `INTERFACE` CMake target.
+
+The core is organised in seven commented sections in dependency order — `number`,
+`lifecycle`, `data_result`, `dynamic_ops`, `codec`, `codecs`, `record_codec` — so it
+stays navigable (search for `// 3/7  data_result`), and a drop-in copy needs only
+this file. `codec_json.hpp` adds the JSON value type and `JsonOps`, `codec_toml.hpp`
+the TOML ones; both are plain headers that include `codec.hpp`.
 
 Everything at namespace scope is `inline` (functions), a template, or an inline
 variable (`JsonOps::INSTANCE`, `codecs::Int`, ...), so including the header from
@@ -154,18 +182,20 @@ any number of translation units is safe and the singletons really are shared:
   `JsonOps::INSTANCE` across the two TUs, which catches a definition that
   silently became translation-unit-local. Swap `inline` for `static` on
   `codecs::Int` and both tests fail;
-* `test/unit/header_self_contained_test.cpp` includes `codec.hpp` *before* any
-  other header — including GoogleTest — so the header cannot borrow declarations
-  from anywhere else;
+* `test/unit/header_self_contained_test.cpp` includes `codec_json.hpp` *before* any
+  other header — including GoogleTest — so both entry headers cannot borrow
+  declarations from anywhere else;
 * eight further TUs include it as the only library header.
 
-The core header's only compile-time dependency is
-[nlohmann/json](#the-json-value-type) (a single header in `third_party/`, or your own
-copy on the include path); the tests additionally need GoogleTest, which the
-`INTERFACE` target does not propagate. The optional TOML layer adds exactly one more:
-tinytoml, and only for `codec_toml` — see [the TOML layer](#the-toml-layer-codec_tomlhpp-optional).
+The **core** has no compile-time dependency beyond the standard library — that is
+enforced, not asserted: `include/codec.hpp` mentions neither `JsonValue` nor
+`nlohmann`, and `-DCODEC_BUILD_JSON=OFF` builds and runs the TOML tests with
+`third_party/nlohmann/json.hpp` renamed away. Each entry header adds exactly its own
+library: nlohmann/json for [`codec_json.hpp`](#the-json-value-type-codec_jsonhpp)
+and tinytoml for [`codec_toml.hpp`](#the-toml-layer-codec_tomlhpp). The tests
+additionally need GoogleTest, which the `INTERFACE` targets do not propagate.
 
-### The JSON value type
+### The JSON value type (`codec_json.hpp`)
 
 DFU's `JsonOps` is backed by Gson's `JsonElement`. This port backs it with
 **nlohmann/json**, specifically `nlohmann::ordered_json`, so that
@@ -186,10 +216,19 @@ Above `JsonValue` sits the ops layer's own value type, `codec::Value`: a
 format-neutral handle (shared owner + node pointer + type tag) that every
 `DynamicOps` implementation exchanges, so a second format's ops plugs into the
 same codecs unchanged — which is exactly what the TOML layer below does. With
-`JsonOps` the payload is a `JsonValue` node, so `value.asJson()` is the way back —
+`JsonOps` the payload is a `JsonValue` node, so `jsonView(value)` is the way back —
 and the erasure costs nothing measurable: the 2-risk codec decode measured 15 423 ns
 against the 15 500 ns it had before the change (see §7 and
 [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)).
+
+The two directions across the erasure live in this header, because the core cannot
+name either type:
+
+```cpp
+JsonValue document = JsonValue::parse(text);
+const Value handle = document;            // JsonValue::operator Value() -- implicit
+const JsonValue back = jsonView(handle);  // Value -> JsonValue (throws if it is not JSON)
+```
 
 `codec::Dynamic` pairs a value with the ops that understands it, which is what
 `codecs::Passthrough` carries (`Codec<Dynamic>`): a raw dynamic value is meaningless
@@ -281,26 +320,28 @@ with `-DCODEC_BUILD_TOML=OFF` and nothing in the project needs tinytoml.
 ## 2. Layout
 
 ```
-include/codec.hpp      the entire library, in eight commented sections:
-                         1 json          JsonValue (nlohmann-backed) + Number (java.lang.Number)
+include/codec.hpp      the core, in seven commented sections (no format, no dependency):
+                         1 number        Number (java.lang.Number)
                          2 lifecycle     Lifecycle
                          3 data_result   DataResult, PartialResult semantics, Unit
                          4 dynamic_ops   DynamicOps, MapLike, RecordBuilder, ListBuilder, KeyCompressor
-                         5 json_ops      JsonOps (INSTANCE / COMPRESSED)
-                         6 codec         Encoder, Decoder, MapEncoder, MapDecoder, Codec, MapCodec
-                         7 codecs        primitive + composite codecs, range checks, recursive, dispatch
-                         8 record_codec  RecordCodecBuilder: record<>, fieldOf, optionalFieldOf, forGetter
-include/codec_toml.hpp optional TOML layer: TomlDocument, parseToml, TomlOps, dumpToml
+                         5 codec         Encoder, Decoder, MapEncoder, MapDecoder, Codec, MapCodec
+                         6 codecs        primitive + composite codecs, range checks, recursive, dispatch
+                         7 record_codec  RecordCodecBuilder: record<>, fieldOf, optionalFieldOf, forGetter
+include/codec_json.hpp JSON entry header: JsonValue, JsonParseError, JsonOps (INSTANCE / COMPRESSED),
+                       jsonView(), JsonValue::operator Value()  (needs third_party/nlohmann)
+include/codec_toml.hpp TOML entry header: TomlDocument, parseToml, TomlOps, dumpToml
                        (one more DynamicOps; needs third_party/tinytoml, never included by codec.hpp)
-models/risk_def.hpp    the risk-definition use case (codecs for RiskDef/Condition)
+docs/adding_a_format.md the contract for a new entry header (checklist, using codec_toml.hpp as the example)
+models/risk_def.hpp    the risk-definition use case (codecs for RiskDef/Condition) -- core-only
 test/
   CMakeLists.txt       defines the layers + the one-click `check` target
-  support/             shared test helpers (test_support.hpp)
+  support/             shared test helpers (test_support.hpp -- JSON helpers)
   unit/                codec_unit_tests   -- component level suites (incl. the ODR guard)
   smoke/               codec_smoke_tests  -- end-to-end API checks
   perf/                codec_perf_tests   -- codec vs nlohmann/json measurements
   unit/toml_ops_test.cpp, smoke/toml_risk_def_test.cpp, perf/toml_perf_test.cpp
-                       -- the TOML layer's three executables
+                       -- the TOML layer's three executables (unit + perf are JSON-free)
 examples/              risk_def_main.cpp
 reference/dfu-6.0.8/   decompiled Java original (study only)
 third_party/           nlohmann/json, googletest, tinytoml
@@ -630,9 +671,18 @@ Intentional deviations and additions, all documented in the headers:
 
 ## 6. Test layers
 
-203 GoogleTest cases in six independent executables. `ctest` prefixes each case
-with its layer (`unit.*`, `smoke.*`, `perf.*`, `toml_unit.*`, `toml_smoke.*`,
-`toml_perf.*`), so any layer can be selected as a group.
+203 GoogleTest cases in six independent executables: the file name column below
+shows which one builds them. `ctest` prefixes each case with its layer (`unit.*`,
+`smoke.*`, `perf.*`, `toml_unit.*`, `toml_smoke.*`, `toml_perf.*`), so any layer can
+be selected as a group.
+
+Which layers exist depends on the configuration: the **JSON** layers
+(`codec_unit_tests`, `codec_smoke_tests`, `codec_perf_tests`, plus the cross-format
+`codec_toml_smoke_tests`) need `CODEC_BUILD_JSON=ON`; the **TOML** layers need
+`CODEC_BUILD_TOML=ON`. With `-DCODEC_BUILD_JSON=OFF` the remaining executables are
+`codec_toml_unit_tests` (15 cases) and `codec_toml_perf_tests` (3) — 18 cases, none
+of which includes a JSON header, so that configuration is real coverage for the
+core + one format rather than an empty build.
 
 **`test/unit/` → `codec_unit_tests` (155 cases)** — component level, exhaustive
 on edge cases:
@@ -652,7 +702,7 @@ on edge cases:
 | `error_path_test.cpp` | error locations: the requested `risks[3].condition.or[0].op` form, message wording rewrites, nested lists, multi-part failures, missing keys, unbounded maps, dispatch payloads, the encode side, strict vs lenient optionals; `FrameTest` pins the `report()` codec chains, their `file(line)` construction sites and both rendering styles; `CodecErrorTest` covers `throwIfError()` / `getOrThrow()` |
 | `stacktrace_test.cpp` | the optional `std::stacktrace` layer: feature-detection consistency, capture and STL-rendered output; skips itself when `CODEC_RECORD_STACKTRACE` is off |
 | `odr_test.cpp` + `odr_probe.cpp` | header-only guarantee: two TUs including the single header link together, and the inline singletons have one shared address |
-| `header_self_contained_test.cpp` | includes `codec.hpp` before every other header, proving the single header stands alone |
+| `header_self_contained_test.cpp` | includes `codec_json.hpp` before every other header, proving both entry headers stand alone |
 
 **`test/smoke/` → `codec_smoke_tests` (23 cases)** — small and fast end-to-end
 passes that answer "does the port work at all?":
@@ -670,16 +720,23 @@ only assertions are that all strategies produce the same result):
 | `codec_perf_test.cpp` | hand-written nlohmann extractor/builder plus nlohmann's own ADL mapping (`from_json` + `get<T>()`), timed against the Codec layer for a 2-risk and a 400-risk document; prints the table in §7 |
 
 Shared helpers live in `test/support/test_support.hpp` (JSON parsing, `decode` /
-`encode` / `decodeError` wrappers that fail the test with the codec message).
+`encode` / `decodeError` wrappers that fail the test with the codec message); they
+include `codec_json.hpp`, so they belong to the JSON layers only.
 
-**The TOML layer has its own executables** (built only when `CODEC_BUILD_TOML=ON`, so
-the core layers stay free of the tinytoml dependency):
+**The TOML layer has its own executables** (`CODEC_BUILD_TOML=ON`, so the JSON
+layers stay free of the tinytoml dependency):
 
-| File | Focus |
-| --- | --- |
-| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests` (15 cases) | `TomlOps` as a `DynamicOps`: scalar reads by type, `BooleanIsNotANumber`, dates as strings, literal `"a.b"` keys via `findChild`, type-strict equality, `convertTo` both ways (and same-ops identity), `dumpToml` rejecting non-table roots / `null` / mixed arrays, parse errors carrying `line 2`, the v0.4 limits (dotted keys, mixed arrays, local time), empty document, list/map merging with strict keys, and the encoding builders (`TomlListBuilder`/`TomlRecordBuilder`): prefix merging without mutating the prefix, accumulator reuse, last-wins on duplicate keys, error propagation through `add`/`withErrorsFrom`/`mapError`, non-string keys, foreign (JSON) handles |
-| `smoke/toml_risk_def_test.cpp` → `codec_toml_smoke_tests` (4 cases) | the *same* `RiskDocumentCodec` on TOML and JSON (identical decoded values), dump → reparse stability, a `Passthrough` `Dynamic` moving JSON → TOML → JSON, TOML values converted back to JSON |
-| `perf/toml_perf_test.cpp` → `codec_toml_perf_tests` (3 cases) | the TOML layer's cost: `parseToml`, parse + decode, pre-parsed decode, encode, encode + `dumpToml`, both `convertTo` directions, and `per-risk encode` — the guard against encoding sliding back to the generic builders (see §7) |
+| File | Focus | Built when |
+| --- | --- | --- |
+| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests` (15 cases) | `TomlOps` as a `DynamicOps`: scalar reads by type, `BooleanIsNotANumber`, dates as strings, literal `"a.b"` keys via `findChild`, type-strict equality, `convertTo` both ways (and same-ops identity), `dumpToml` rejecting non-table roots / `null` / mixed arrays, parse errors carrying `line 2`, the v0.4 limits (dotted keys, mixed arrays, local time), empty document, list/map merging with strict keys, and the encoding builders (`TomlListBuilder`/`TomlRecordBuilder`): prefix merging without mutating the prefix, accumulator reuse, last-wins on duplicate keys, error propagation through `add`/`withErrorsFrom`/`mapError`, non-string keys, foreign (JSON) handles | TOML (JSON-free) |
+| `smoke/toml_risk_def_test.cpp` → `codec_toml_smoke_tests` (4 cases) | the *same* `RiskDocumentCodec` on TOML and JSON (identical decoded values), dump → reparse stability, a `Passthrough` `Dynamic` moving JSON → TOML → JSON, TOML values converted back to JSON | TOML **and** JSON |
+| `perf/toml_perf_test.cpp` → `codec_toml_perf_tests` (3 cases) | the TOML layer's cost: `parseToml`, parse + decode, pre-parsed decode, encode, encode + `dumpToml`, (with JSON) both `convertTo` directions and the JSON rows, and `per-risk encode` — the guard against encoding sliding back to the generic builders (see §7) | TOML (JSON-free) |
+
+The two JSON-free files touch JSON only inside `#ifdef CODEC_TEST_WITH_JSON`, which
+CMake defines when the JSON layer is built — that is what keeps the
+`-DCODEC_BUILD_JSON=OFF` configuration honestly testable. The cross-format smoke test
+is the exception: comparing the same codec on two formats needs both, so it is built
+only when both are on.
 
 The TOML perf layer is a separate executable on purpose: adding cases to
 `codec_perf_tests` would perturb the JSON numbers it has recorded (code layout alone

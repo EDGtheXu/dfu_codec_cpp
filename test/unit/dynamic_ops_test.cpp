@@ -33,10 +33,10 @@ codec::Codec<Point> pointCodec() {
 }
 
 TEST(DynamicOpsTest, EmptyValues) {
-  EXPECT_TRUE(JsonOps::INSTANCE.empty().asJson().isNull());
-  EXPECT_EQ(JsonOps::INSTANCE.emptyMap().asJson().dump(), "{}");
-  EXPECT_EQ(JsonOps::INSTANCE.emptyList().asJson().dump(), "[]");
-  EXPECT_EQ(JsonOps::INSTANCE.convertTo(JsonOps::INSTANCE, json(R"({"a":1})")).asJson().dump(),
+  EXPECT_TRUE(jsonView(JsonOps::INSTANCE.empty()).isNull());
+  EXPECT_EQ(jsonView(JsonOps::INSTANCE.emptyMap()).dump(), "{}");
+  EXPECT_EQ(jsonView(JsonOps::INSTANCE.emptyList()).dump(), "[]");
+  EXPECT_EQ(jsonView(JsonOps::INSTANCE.convertTo(JsonOps::INSTANCE, json(R"({"a":1})"))).dump(),
             R"({"a":1})");
 }
 
@@ -56,33 +56,33 @@ TEST(DynamicOpsTest, PrimitiveAccessors) {
 TEST(DynamicOpsTest, MergeToList) {
   const DataResult<Value> fresh = JsonOps::INSTANCE.mergeToList(JsonOps::INSTANCE.empty(), json("1"));
   ASSERT_TRUE(fresh.result().has_value());
-  EXPECT_EQ(fresh.result()->asJson().dump(), "[1]");
+  EXPECT_EQ(jsonView(*fresh.result()).dump(), "[1]");
 
   const DataResult<Value> appended = JsonOps::INSTANCE.mergeToList(json("[1]"), json("2"));
   ASSERT_TRUE(appended.result().has_value());
-  EXPECT_EQ(appended.result()->asJson().dump(), "[1,2]");
+  EXPECT_EQ(jsonView(*appended.result()).dump(), "[1,2]");
 
   const DataResult<Value> many =
       JsonOps::INSTANCE.mergeToList(json("[1]"), std::vector<Value>{json("2"), json("3")});
   ASSERT_TRUE(many.result().has_value());
-  EXPECT_EQ(many.result()->asJson().dump(), "[1,2,3]");
+  EXPECT_EQ(jsonView(*many.result()).dump(), "[1,2,3]");
 
   const DataResult<Value> failure = JsonOps::INSTANCE.mergeToList(json(R"({"a":1})"), json("2"));
   ASSERT_TRUE(failure.isError());
   EXPECT_EQ(failure.message(), R"(mergeToList called with not a list: {"a":1})");
-  EXPECT_EQ(failure.valueOrPartial()->asJson().dump(), R"({"a":1})");
+  EXPECT_EQ(jsonView(*failure.valueOrPartial()).dump(), R"({"a":1})");
 }
 
 TEST(DynamicOpsTest, MergeToMap) {
   const DataResult<Value> fresh =
       JsonOps::INSTANCE.mergeToMap(JsonOps::INSTANCE.empty(), json("\"a\""), json("1"));
   ASSERT_TRUE(fresh.result().has_value());
-  EXPECT_EQ(fresh.result()->asJson().dump(), R"({"a":1})");
+  EXPECT_EQ(jsonView(*fresh.result()).dump(), R"({"a":1})");
 
   const DataResult<Value> appended =
       JsonOps::INSTANCE.mergeToMap(json(R"({"a":1})"), json("\"b\""), json("2"));
   ASSERT_TRUE(appended.result().has_value());
-  EXPECT_EQ(appended.result()->asJson().dump(), R"({"a":1,"b":2})");
+  EXPECT_EQ(jsonView(*appended.result()).dump(), R"({"a":1,"b":2})");
 
   const DataResult<Value> notAMap =
       JsonOps::INSTANCE.mergeToMap(json("[1]"), json("\"a\""), json("1"));
@@ -102,7 +102,7 @@ TEST(DynamicOpsTest, MapViewFiltersNullsOnGetButNotOnEntries) {
   // JsonOps.getMap returns null for an explicit JSON null member...
   EXPECT_FALSE((*map.result())->get("a").has_value());
   ASSERT_TRUE((*map.result())->get("b").has_value());
-  EXPECT_EQ((*map.result())->get("b")->asJson().dump(), "1");
+  EXPECT_EQ(jsonView(*(*map.result())->get("b")).dump(), "1");
   EXPECT_FALSE((*map.result())->get("missing").has_value());
   // ... but entries() still reports it.
   EXPECT_EQ((*map.result())->entries().size(), 2u);
@@ -125,29 +125,29 @@ TEST(DynamicOpsTest, StreamAndMapValues) {
   const DataResult<std::vector<std::pair<Value, Value>>> values =
       JsonOps::INSTANCE.getMapValues(json(R"({"a":1})"));
   ASSERT_TRUE(values.result().has_value());
-  EXPECT_EQ(values.result()->at(0).first.asJson().dump(), "\"a\"");
-  EXPECT_EQ(values.result()->at(0).second.asJson().dump(), "1");
+  EXPECT_EQ(jsonView(values.result()->at(0).first).dump(), "\"a\"");
+  EXPECT_EQ(jsonView(values.result()->at(0).second).dump(), "1");
 }
 
 TEST(DynamicOpsTest, GenericGetSetUpdateRemove) {
   const JsonValue object = json(R"({"a":1,"b":2})");
   ASSERT_TRUE(JsonOps::INSTANCE.get(object, "a").result().has_value());
-  EXPECT_EQ(JsonOps::INSTANCE.get(object, "a").result()->asJson().dump(), "1");
+  EXPECT_EQ(jsonView(*JsonOps::INSTANCE.get(object, "a").result()).dump(), "1");
 
   const DataResult<Value> missing = JsonOps::INSTANCE.get(object, "zz");
   ASSERT_TRUE(missing.isError());
   EXPECT_EQ(missing.message(), "No element \"zz\" in the map {\"a\":1,\"b\":2}");
 
-  EXPECT_EQ(JsonOps::INSTANCE.set(object, "c", json("3")).asJson().dump(), R"({"a":1,"b":2,"c":3})");
-  EXPECT_EQ(JsonOps::INSTANCE.update(object, "a", [](const Value& value) {
-              return JsonValue::number(value.asJson().asNumber().intValue() + 10);
-            }).asJson().dump(),
+  EXPECT_EQ(jsonView(JsonOps::INSTANCE.set(object, "c", json("3"))).dump(), R"({"a":1,"b":2,"c":3})");
+  EXPECT_EQ(jsonView(JsonOps::INSTANCE.update(object, "a", [](const Value& value) {
+              return JsonValue::number(jsonView(value).asNumber().intValue() + 10);
+            })).dump(),
             R"({"a":11,"b":2})");
-  EXPECT_EQ(JsonOps::INSTANCE.update(object, "missing",
-                                     [](const Value& value) { return value; }).asJson().dump(),
+  EXPECT_EQ(jsonView(JsonOps::INSTANCE.update(object, "missing",
+                                     [](const Value& value) { return value; })).dump(),
             R"({"a":1,"b":2})");
-  EXPECT_EQ(JsonOps::INSTANCE.remove(object, "a").asJson().dump(), R"({"b":2})");
-  EXPECT_EQ(JsonOps::INSTANCE.remove(json("[1]"), "a").asJson().dump(), "[1]");
+  EXPECT_EQ(jsonView(JsonOps::INSTANCE.remove(object, "a")).dump(), R"({"b":2})");
+  EXPECT_EQ(jsonView(JsonOps::INSTANCE.remove(json("[1]"), "a")).dump(), "[1]");
 }
 
 TEST(DynamicOpsTest, RecordBuilderBuildsObjects) {
@@ -156,7 +156,7 @@ TEST(DynamicOpsTest, RecordBuilderBuildsObjects) {
   builder->add(std::string("b"), DataResult<Value>::success(json("2")));
   const DataResult<Value> built = builder->build(JsonOps::INSTANCE.empty());
   ASSERT_TRUE(built.result().has_value());
-  EXPECT_EQ(built.result()->asJson().dump(), R"({"a":1,"b":2})");
+  EXPECT_EQ(jsonView(*built.result()).dump(), R"({"a":1,"b":2})");
 
   // A failing field value is carried into the builder result.
   const std::shared_ptr<RecordBuilder> failing = JsonOps::INSTANCE.mapBuilder();
@@ -170,7 +170,7 @@ TEST(DynamicOpsTest, RecordBuilderBuildsObjects) {
   merged->add(std::string("b"), json("2"));
   const DataResult<Value> mergedResult = merged->build(json(R"({"a":1})"));
   ASSERT_TRUE(mergedResult.result().has_value());
-  EXPECT_EQ(mergedResult.result()->asJson().dump(), R"({"a":1,"b":2})");
+  EXPECT_EQ(jsonView(*mergedResult.result()).dump(), R"({"a":1,"b":2})");
 
   // ... but refuses a non-object prefix.
   const std::shared_ptr<RecordBuilder> badPrefix = JsonOps::INSTANCE.mapBuilder();
@@ -228,7 +228,7 @@ TEST(DynamicOpsTest, ListBuilderBuildsArrays) {
   builder->add(DataResult<Value>::success(json("2")));
   const DataResult<Value> built = builder->build(JsonOps::INSTANCE.empty());
   ASSERT_TRUE(built.result().has_value());
-  EXPECT_EQ(built.result()->asJson().dump(), "[1,2]");
+  EXPECT_EQ(jsonView(*built.result()).dump(), "[1,2]");
 
   const std::shared_ptr<codec::ListBuilder> failing = JsonOps::INSTANCE.listBuilder();
   failing->add(DataResult<Value>::error("bad element"));
@@ -251,7 +251,7 @@ TEST(KeyCompressorTest, AssignsDenseIndicesInKeyOrder) {
   EXPECT_EQ(compressor.compress(json("\"b\"")), 1);
   EXPECT_EQ(compressor.compress("unknown"), -1);
   ASSERT_TRUE(compressor.decompress(1) != nullptr);
-  EXPECT_EQ(compressor.decompress(1)->asJson().dump(), "\"b\"");
+  EXPECT_EQ(jsonView(*compressor.decompress(1)).dump(), "\"b\"");
   EXPECT_EQ(compressor.decompress(5), nullptr);
   EXPECT_EQ(compressor.decompress(-1), nullptr);
 }
@@ -273,7 +273,7 @@ TEST(CompressedMapsTest, RecordEncodesAndDecodesAsAKeyedList) {
   const Point point{1, 2};
   const DataResult<Value> encoded = pointCodec().encodeStart(JsonOps::COMPRESSED, point);
   ASSERT_TRUE(encoded.result().has_value());
-  EXPECT_EQ(encoded.result()->asJson().dump(), "[1,2]");
+  EXPECT_EQ(jsonView(*encoded.result()).dump(), "[1,2]");
 
   const Point decoded = decode(pointCodec(), "[1,2]", JsonOps::COMPRESSED);
   EXPECT_EQ(decoded, point);

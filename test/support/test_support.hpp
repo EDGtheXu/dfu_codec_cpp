@@ -7,16 +7,16 @@
 
 #include <gtest/gtest.h>
 
-#include "codec.hpp"
+#include "codec_json.hpp"
 
 namespace codec {
 namespace testing {
 
 inline JsonValue json(const std::string& text) { return JsonValue::parse(text); }
 
-// 阶段 1：ops 层收发类型擦除的句柄 codec::Value（JsonValue 仍是 JSON 的 DOM）。
-// 测试里要读 JSON 文本时用这两个小工具，避免到处写 .asJson()。
-inline std::string dumpJson(const Value& value) { return value.asJson().dump(); }
+// 核里的 Value 是类型擦除的句柄；测试里要读 JSON 文本时用这两个小工具，
+// 避免到处写 jsonView(value)。
+inline std::string dumpJson(const Value& value) { return jsonView(value).dump(); }
 inline std::string dumpJson(const JsonValue& value) { return value.dump(); }
 
 // Parses `text` and decodes it, failing the test with the codec error message.

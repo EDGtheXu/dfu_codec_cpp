@@ -21,20 +21,49 @@ option(CODEC_RECORD_STACKTRACE
   "Capture a std::stacktrace for every error (needs C++23; file:line needs debug info)" OFF)
 option(CODEC_BUILD_PROTOTYPE
   "Build the generic-ops design prototype (experiment, not part of the library)" OFF)
+option(CODEC_BUILD_JSON
+  "Build the JSON entry header (include/codec_json.hpp) and the JSON test layers; needs third_party/nlohmann/json.hpp" ON)
 option(CODEC_BUILD_TOML
   "Build the optional TOML layer (include/codec_toml.hpp) and its tests; needs third_party/tinytoml" ON)
 
 # ---------------------------------------------------------------------------
-# Header-only interface library
+# Header-only interface libraries, one per entry header:
+#
+#   codec        the core (include/codec.hpp): erased value + ops interface +
+#                codec layer.  No format, and no third-party include path at all.
+#   codec_json   the JSON entry header (include/codec_json.hpp) + nlohmann/json.
+#   codec_toml   the TOML entry header (include/codec_toml.hpp) + tinytoml.
+#
+# Linking `codec` alone is enough to use the core and to build with a machine that
+# has no JSON library at all.
 # ---------------------------------------------------------------------------
 add_library(codec INTERFACE)
 add_library(codec::codec ALIAS codec)
 target_include_directories(codec INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
-  # nlohmann/json single header (<nlohmann/json.hpp>)
-  "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
 )
 target_compile_features(codec INTERFACE cxx_std_17)
+
+# ---------------------------------------------------------------------------
+# The JSON entry header: include/codec_json.hpp (+ nlohmann/json).
+# Only this target carries third_party/, so the core cannot accidentally depend
+# on a serialisation library.
+# ---------------------------------------------------------------------------
+if(CODEC_BUILD_JSON)
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann/json.hpp")
+    message(FATAL_ERROR
+      "nlohmann/json not found at third_party/nlohmann/json.hpp (needed by "
+      "include/codec_json.hpp).\n"
+      "Download it with: powershell -File scripts/fetch_deps.ps1\n"
+      "or configure with -DCODEC_BUILD_JSON=OFF to build without the JSON layer.")
+  endif()
+  add_library(codec_json INTERFACE)
+  add_library(codec::json ALIAS codec_json)
+  target_link_libraries(codec_json INTERFACE codec)
+  target_include_directories(codec_json INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
+  )
+endif()
 
 # ---------------------------------------------------------------------------
 # The optional TOML layer: include/codec_toml.hpp (+ tinytoml).
@@ -48,6 +77,7 @@ if(CODEC_BUILD_TOML)
       "Download it, or configure with -DCODEC_BUILD_TOML=OFF.")
   endif()
   add_library(codec_toml INTERFACE)
+  add_library(codec::toml ALIAS codec_toml)
   target_link_libraries(codec_toml INTERFACE codec)
   target_include_directories(codec_toml INTERFACE
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinytoml")
@@ -81,19 +111,14 @@ endif()
 
 # ---------------------------------------------------------------------------
 # Third-party dependencies
-#   * nlohmann/json (header only) -- the JSON parser/serializer/DOM backing
-#     JsonValue; see scripts/fetch_deps.ps1
-#   * GoogleTest -- only needed for the unit tests
+#   * nlohmann/json (header only) -- checked by the codec_json target above
+#   * GoogleTest -- only needed for the tests; see scripts/fetch_deps.ps1
 # ---------------------------------------------------------------------------
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann/json.hpp")
-  message(FATAL_ERROR
-    "nlohmann/json not found at third_party/nlohmann/json.hpp.\n"
-    "Download it with: powershell -File scripts/fetch_deps.ps1")
-endif()
 
 # ---------------------------------------------------------------------------
-# Tests -- layered: test/unit (one executable) and test/smoke (one executable),
-# both registered with CTest.
+# Tests -- layered, one executable per layer, all registered with CTest.
+# JSON layers need CODEC_BUILD_JSON, the TOML layers CODEC_BUILD_TOML; the
+# JSON <-> TOML cross-format smoke test needs both.
 # ---------------------------------------------------------------------------
 if(CODEC_BUILD_TESTS)
   set(CODEC_GTEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/googletest-1.17.0")
@@ -113,10 +138,14 @@ if(CODEC_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
-# Examples
+# Examples (the risk-definition demo is a JSON example)
 # ---------------------------------------------------------------------------
 if(CODEC_BUILD_EXAMPLES)
-  add_subdirectory(examples)
+  if(CODEC_BUILD_JSON)
+    add_subdirectory(examples)
+  else()
+    message(STATUS "Examples need the JSON layer; skipping (CODEC_BUILD_JSON=OFF)")
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------

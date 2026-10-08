@@ -276,8 +276,8 @@ TEST(RiskDefTest, NestedConditionalGroupsAreRecursive) {
   // 这里刻意用 JSON 节点访问器而不是 ops 的 asNumber()：JsonOps 的
   // getNumberValue 会把布尔强制成数字（移植的既有怪癖），
   // 那样 `true` 也能通过这些断言，断言强度就弱了。
-  EXPECT_TRUE(group.andClauses[0].value->value().asJson().isNumber());
-  EXPECT_EQ(group.andClauses[0].value->value().asJson().asNumber().intValue(), 1);
+  EXPECT_TRUE(jsonView(group.andClauses[0].value->value()).isNumber());
+  EXPECT_EQ(jsonView(group.andClauses[0].value->value()).asNumber().intValue(), 1);
   ASSERT_EQ(group.andClauses[1].notClauses.size(), 1u);
   EXPECT_EQ(*group.andClauses[1].notClauses[0].param, "b");
 

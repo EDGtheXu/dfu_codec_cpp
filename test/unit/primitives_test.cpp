@@ -80,7 +80,7 @@ TEST(PrimitiveCodecTest, EncodeUsesMergeToPrimitive) {
   // A fresh prefix (ops.empty()) accepts the primitive.
   const DataResult<Value> fresh = Int.encodeStart(JsonOps::INSTANCE, 5);
   ASSERT_TRUE(fresh.result().has_value());
-  EXPECT_EQ(fresh.result()->asJson().dump(), "5");
+  EXPECT_EQ(jsonView(*fresh.result()).dump(), "5");
 
   // A non-empty prefix cannot absorb a primitive -- DFU's mergeToPrimitive.
   const DataResult<Value> merged = Int.encode(5, JsonOps::INSTANCE, json(R"({"a":1})"));
@@ -88,7 +88,7 @@ TEST(PrimitiveCodecTest, EncodeUsesMergeToPrimitive) {
   EXPECT_EQ(merged.message(),
             "Do not know how to append a primitive value 5 to {\"a\":1}");
   // The primitive itself is offered as the partial result.
-  EXPECT_EQ(merged.valueOrPartial()->asJson().dump(), "5");
+  EXPECT_EQ(jsonView(*merged.valueOrPartial()).dump(), "5");
 }
 
 TEST(PrimitiveCodecTest, PassthroughKeepsArbitraryJson) {
@@ -104,7 +104,7 @@ TEST(PrimitiveCodecTest, PassthroughMergesIntoAMapPrefix) {
   const DataResult<Value> merged =
       Passthrough.encode(dynamicJson(R"({"b":2})"), JsonOps::INSTANCE, json(R"({"a":1})"));
   ASSERT_TRUE(merged.result().has_value());
-  EXPECT_EQ(merged.result()->asJson().dump(), R"({"a":1,"b":2})");
+  EXPECT_EQ(jsonView(*merged.result()).dump(), R"({"a":1,"b":2})");
 }
 
 }  // namespace

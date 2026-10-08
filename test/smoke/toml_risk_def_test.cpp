@@ -109,7 +109,7 @@ TEST(TomlRiskDefTest, TomlValuesConvertBackToJson) {
   ASSERT_TRUE(parsed.result().has_value()) << parsed.message();
 
   const Value asJson = TomlOps::INSTANCE.convertTo(JsonOps::INSTANCE, parsed.result()->root());
-  const std::string text = asJson.asJson().dump();
+  const std::string text = jsonView(asJson).dump();
   EXPECT_NE(text.find(R"("title":"demo")"), std::string::npos);
   EXPECT_NE(text.find("1979-05-27"), std::string::npos);
   EXPECT_NE(text.find(R"("limits":{"max":10})"), std::string::npos);

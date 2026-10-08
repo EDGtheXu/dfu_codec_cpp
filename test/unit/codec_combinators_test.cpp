@@ -192,7 +192,7 @@ TEST(ListCodecTest, FailedElementsAreReportedInThePartialResult) {
   // Only the elements up to the first failure are kept...
   EXPECT_EQ(partial.first, std::vector<int32_t>{1});
   // ... and the offending raw values are collected as the "remaining" value.
-  EXPECT_EQ(partial.second.asJson().dump(), "[\"x\"]");
+  EXPECT_EQ(jsonView(partial.second).dump(), "[\"x\"]");
 
   // Codec::parse projects the pair onto its first component, so the partial
   // value of the failing parse is the vector itself.
@@ -272,7 +272,7 @@ TEST(CodecFieldTest, FieldOfReadsAndWritesAMember) {
 
   const std::shared_ptr<codec::RecordBuilder> builder = JsonOps::INSTANCE.mapBuilder();
   field.encode("x", JsonOps::INSTANCE, *builder);
-  EXPECT_EQ(builder->build(JsonOps::INSTANCE.empty()).result()->asJson().dump(), R"({"name":"x"})");
+  EXPECT_EQ(jsonView(*builder->build(JsonOps::INSTANCE.empty()).result()).dump(), R"({"name":"x"})");
 }
 
 TEST(CodecFieldTest, OptionalFieldTreatsInvalidValuesAsAbsent) {

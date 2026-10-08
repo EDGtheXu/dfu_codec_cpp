@@ -8,7 +8,7 @@
 #include <sstream>
 #include <string>
 
-#include "codec.hpp"
+#include "codec_json.hpp"
 #include "risk_def.hpp"
 
 namespace {
@@ -120,9 +120,9 @@ int main(int argc, char** argv) {
       std::cerr << "encode failed:\n" << encoded.report() << "\n";
       return 1;
     }
-    std::cout << "\nre-encoded:\n" << encoded.result()->asJson().dump(true, 2) << "\n";
+    std::cout << "\nre-encoded:\n" << jsonView(*encoded.result()).dump(true, 2) << "\n";
     std::cout << "\nround-trip identical to input: "
-              << (encoded.result()->asJson().dump() == input.dump() ? "yes" : "no") << "\n";
+              << (jsonView(*encoded.result()).dump() == input.dump() ? "yes" : "no") << "\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "error: " << error.what() << "\n";

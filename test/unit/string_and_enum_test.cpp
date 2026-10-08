@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "codec.hpp"
+#include "codec_json.hpp"
 #include <gtest/gtest.h>
 
 namespace {
@@ -141,7 +141,7 @@ DataResult<A> decode(const Codec<A>& codec, const std::string& text) {
 template <class A>
 std::string encode(const Codec<A>& codec, const typename Codec<A>::value_type& value) {
   const DataResult<Value> encoded = codec.encodeStart(JsonOps::INSTANCE, value);
-  return encoded.result().has_value() ? encoded.result()->asJson().dump() : "error: " + encoded.message();
+  return encoded.result().has_value() ? jsonView(*encoded.result()).dump() : "error: " + encoded.message();
 }
 
 TEST(NumberToEnumTest, JsonNumberDecodesIntoAnEnumClass) {

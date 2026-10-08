@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-#include "codec.hpp"
+#include "codec_json.hpp"
 #include <gtest/gtest.h>
 
 namespace {

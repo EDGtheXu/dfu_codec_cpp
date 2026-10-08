@@ -29,7 +29,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "codec.hpp"  // 真实的 codec::JsonValue：证明擦除句柄能和它零拷贝互操作
+#include "codec_json.hpp"  // JSON 入口头（核 codec.hpp 不再认识 JsonValue）
 
 namespace proto {
 

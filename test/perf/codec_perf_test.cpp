@@ -202,7 +202,7 @@ nlohmann::ordered_json buildManually(const RiskDocument& document) {
             rawClause["op"] = *clause.op;
           }
           if (clause.value.has_value()) {
-            rawClause["value"] = clause.value->value().asJson().raw();
+            rawClause["value"] = jsonView(clause.value->value()).raw();
           }
           rawCondition["or"].push_back(rawClause);
         }
@@ -214,7 +214,7 @@ nlohmann::ordered_json buildManually(const RiskDocument& document) {
         rawCondition["op"] = *condition.op;
       }
       if (condition.value.has_value()) {
-        rawCondition["value"] = condition.value->value().asJson().raw();
+        rawCondition["value"] = jsonView(condition.value->value()).raw();
       }
       if (condition.listMatch.has_value()) {
         rawCondition["list_match"] = *condition.listMatch;
@@ -308,7 +308,7 @@ inline void to_json(nlohmann::ordered_json& raw, const Condition& condition) {
     raw["op"] = *condition.op;
   }
   if (condition.value.has_value()) {
-    raw["value"] = condition.value->value().asJson().raw();
+    raw["value"] = jsonView(condition.value->value()).raw();
   }
   if (condition.listMatch.has_value()) {
     raw["list_match"] = *condition.listMatch;
@@ -397,20 +397,18 @@ TEST(PerfTest, StrategiesAgreeOnTheFixture) {
     ASSERT_EQ(viaCodec.risks.size(), fixture.risks) << fixture.name;
     EXPECT_EQ(viaCodec, viaManual) << fixture.name;
     EXPECT_EQ(viaCodec, viaNlohmann) << fixture.name;
-    EXPECT_EQ(risk::riskDocumentCodec()
-                  .encodeStart(codec::JsonOps::INSTANCE, viaCodec)
-                  .result()
-                  ->asJson()
+    EXPECT_EQ(jsonView(*risk::riskDocumentCodec()
+                            .encodeStart(codec::JsonOps::INSTANCE, viaCodec)
+                            .result())
                   .dump(),
               buildManually(viaCodec).dump())
         << fixture.name;
     // nlohmann's to_json conversion must produce the same document too.
     const nlohmann::ordered_json converted = viaCodec;
     EXPECT_EQ(converted.dump(),
-              risk::riskDocumentCodec()
-                  .encodeStart(codec::JsonOps::INSTANCE, viaCodec)
-                  .result()
-                  ->asJson()
+              jsonView(*risk::riskDocumentCodec()
+                            .encodeStart(codec::JsonOps::INSTANCE, viaCodec)
+                            .result())
                   .dump())
         << fixture.name;
   }
@@ -486,9 +484,8 @@ void runComparison(const Fixture& fixture) {
 
     printHeader("encoding");
     const Measurement codecEncode = measure("codec encode + dump", [&] {
-      g_sink += documentCodec.encodeStart(codec::JsonOps::INSTANCE, expected)
-                    .result()
-                    ->asJson().dump()
+      g_sink += jsonView(*documentCodec.encodeStart(codec::JsonOps::INSTANCE, expected).result())
+                    .dump()
                     .size();
     });
     const Measurement manualEncode = measure("manual build + dump", [&] {

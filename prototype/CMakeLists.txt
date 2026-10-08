@@ -17,7 +17,7 @@ add_executable(codec_generic_ops_poc_tagged ${CODEC_POC_SOURCES})
 target_compile_definitions(codec_generic_ops_poc_tagged PRIVATE PROTO_TAGGED_HANDLE=1)
 
 foreach(poc_target codec_generic_ops_poc codec_generic_ops_poc_tagged)
-  target_link_libraries(${poc_target} PRIVATE codec)
+  target_link_libraries(${poc_target} PRIVATE codec_json)
   if(MSVC)
     target_compile_options(${poc_target} PRIVATE /utf-8 /W4 /permissive- /bigobj)
   else()

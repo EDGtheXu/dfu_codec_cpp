@@ -152,7 +152,7 @@ TEST(DispatchCodecTest, CompressedDispatchUsesTypeAndValueSlots) {
   ASSERT_TRUE(encoded.result().has_value());
   // In compressed mode the dispatch codec writes a two-entry list, and the
   // payload is itself compressed by the selected record codec.
-  EXPECT_EQ(encoded.result()->asJson().dump(), R"(["circle",[1.5]])");
+  EXPECT_EQ(jsonView(*encoded.result()).dump(), R"(["circle",[1.5]])");
   EXPECT_EQ(decode(shapeCodec(), R"(["circle",[1.5]])", JsonOps::COMPRESSED),
             Shape(Circle{1.5}));
 }

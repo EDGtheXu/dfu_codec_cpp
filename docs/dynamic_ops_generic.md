@@ -1,13 +1,15 @@
 # 泛化 ops（方案 B）设计记录
 
 状态：**阶段 0（可行性 + 微基准）、阶段 1（ops 层 + codec 层擦除）、阶段 2（`Dynamic`）、
-阶段 3（第二种格式：TOML）均已完成**。门禁实测：阶段 1 绝对性能与改动前持平
-（2 风险 codec 解码 15 423 ns vs 基线 15 500 ns）；阶段 3 的复测见 §4.3
-（隔离解码指标在**代码布局噪声**内，`unboundedMap` 成功路径的多余分配已修掉），
+阶段 3（第二种格式：TOML）、阶段 5（把 JSON 层从核切出去）均已完成**。门禁实测：
+阶段 1 绝对性能与改动前持平（2 风险 codec 解码 15 423 ns vs 基线 15 500 ns）；阶段 3 的
+复测见 §4.3（隔离解码指标在**代码布局噪声**内，`unboundedMap` 成功路径的多余分配已修掉），
 验收后按 §4.4 修掉了 TOML 编码的 O(N²)（400 项 248 ms → 4.2 ms，线性）。
-203/203 测试在 Release（MSVC 14.50）与 Debug（MSVC 14.44）下全绿。
+阶段 5 之后：核 `codec.hpp` 里 `JsonValue`/`nlohmann` 各 **0** 次命中，
+**没有 nlohmann 也能构建运行**（见 §4.6）——203/203 在 Release（MSVC 14.50）与
+Debug（MSVC 14.44）下全绿，无 JSON 配置 18/18，TOML=OFF 配置 181/181。
 分支：`generic-ops`（`zh-cn` 未受影响）。原型代码在 [`prototype/`](../prototype)：
-**设计实验，不是库的一部分**，阶段 4 收尾后应删除。
+**设计实验，不是库的一部分**，且仍 include 旧核（见 §4.6 末）；阶段 4 收尾时连同它一起删除。
 
 ## 1. 目标
 
@@ -134,7 +136,7 @@ JSON 的 `null` 映射为目标 ops 的 `empty()`：`convertTo` 保持 DFU 的�
 * **因此选 32 字节带标签句柄**：代价测不出来，却能把"把 A 格式的句柄递给 B 格式的 ops"
   这种静默 UB 变成明确诊断——原型里就真的踩到过（见 §4.1）。
 * 若阶段 1 的真实数字超过 5 %，退路是给 `JsonOps` 加 JSON 快速旁路
-  （`ops.asJson()` → 直接收发 `JsonValue`，绕开装箱），而不是放弃方案。
+  （`jsonView(ops)` → 直接收发 `JsonValue`，绕开装箱），而不是放弃方案。
 
 ### 4.1 原型踩到的两个坑（阶段 1 必须写进规范）
 
@@ -149,7 +151,7 @@ JSON 的 `null` 映射为目标 ops 的 `empty()`：`convertTo` 保持 DFU 的�
 
 ### 4.2 阶段 1 的实测与优化（2 风险文档，MSVC 14.50 Release）
 
-第一版转换（"每处签名换成 `Value`，`JsonOps` 用 `value.asJson()` 取节点"）确实慢了：
+第一版转换（"每处签名换成 `Value`，`JsonOps` 用 `jsonView(value)` 取节点"）确实慢了：
 codec 解码 16 422 ns（基线 15 500，+5.9 %），比值 vs 裸 parser 1.344（README 1.20）。
 定位到**多余的所有权流量**——`shared_ptr` 的每一次复制都是一对原子 RMW：
 
@@ -307,9 +309,51 @@ TOML 之所以没暴露它，只是因为 `TomlOps` 恰好覆写了 `mapBuilder`
 **该用例已用临时改回旧实现的方式验证过**：旧实现下 `location()` 为空、`describe()` 丢掉
 `severity: ` 前缀，用例变红；改回新实现后通过——即这条用例真的能抓住这类回归。
 
-## 5. 阶段 1–4（每阶段门禁：全绿 + perf 复测）
+### 4.6 阶段 5：把 JSON 层从核里切出去
 
-改动面（按段量化，`JsonValue` 出现次数）：
+目标：**核 `codec.hpp` 只放擦除值 + ops 接口 + codec 层**，JSON 进 `codec_json.hpp`、
+TOML 留在 `codec_toml.hpp`，做到"没有 nlohmann 也能构建运行"。
+
+改动面（按 `JsonValue`/`nlohmann` 命中统计，切分前）：1 段（`JsonValue` + `JsonParseError`）
+104 + 26 次、4 段 51 次散件、5 段（`JsonOps`）57 次；2/3/6/7/8 段为 0。
+
+| 处理 | 内容 |
+| --- | --- |
+| **搬走** | `JsonValue`/`JsonParseError`、`detail::nullNodeOwner`/`numberOf`/`jsonNodesEqual`、`putRawMember`/`putJsonMember`、`JsonObjectMapLike`、`ArrayListBuilder`、`StringRecordBuilder`（含它们的 `build`/`buildState` 类外定义）、`JsonOps` + `INSTANCE` |
+| **留在核** | `Number`（格式无关：`getNumberValue` 返回它）、ops 接口、codec 层、`Value`/`Dynamic`、`DataResult`/`Lifecycle`、诊断与栈帧 |
+| **四个互操作钩子改成"替换"** | `Value(const JsonValue&)` → JSON 头里的 `JsonValue::operator Value() const`（隐式，于是 `parse(JsonOps::INSTANCE, JsonValue::parse(text))` 照旧可写）；`Value::asJson()` → JSON 头里的自由函数 `jsonView(const Value&)`；`JsonValue::toValue()` 随类搬走；nlohmann 的 include 与说明搬到 JSON 头。**没有用 `#ifdef` 条件包含**——那会让 ODR 分叉 |
+| **4 段里被漏掉的真实耦合** | `MapDecoder::compressedDecode` 与 `MapEncoder::compressedBuilder`（第 6 段，格式无关代码）直接构造 `CompressedMapLike` / `CompressedRecordBuilder`。这两个类其实**不依赖 JSON**（只有"空槽位=null"和"键文本"两处 JSON 化），因此没有再加 `DynamicOps` 钩子，而是把它们**改成格式无关**：空槽位判定用 `ops.empty()`（JSON 下就是 null），键文本走新增的 `detail::withKeyPath`（问 ops），渲染走 `ops.toString`。JSON 侧行为逐字不变（`empty()` 就是缓存的那个 null 节点） |
+
+**硬性断言**（实测，代码与注释都算）：
+
+```powershell
+# include/codec.hpp: JsonValue=0 nlohmann=0
+# include/codec.hpp 不 include codec_json.hpp / codec_toml.hpp / <nlohmann/*>
+# include/codec_toml.hpp 只 include codec.hpp 与 <toml/toml.h>
+```
+
+CMake 侧：`option(CODEC_BUILD_JSON)`；核目标 `codec` 只带 `include/`，nlohmann 的 include
+目录移到新的 `codec_json` INTERFACE 目标（存在性检查也跟着移过去）；JSON 测试层挂在
+`CODEC_BUILD_JSON` 下，TOML 层挂在 `CODEC_BUILD_TOML` 下，跨格式冒烟挂在两者都开时。
+文件小节从 8 段重编号为 7 段（少了 json/json_ops）。
+
+**验收实测**：
+
+| 配置 | 结果 |
+| --- | --- |
+| Release（MSVC 14.50），`build/` | 0 warning、**203/203** |
+| Debug（MSVC 14.44），`cmake-build-debug/` | 0 warning、**203/203** |
+| `CODEC_BUILD_JSON=OFF`（且把 `third_party/nlohmann/json.hpp` 改名藏起来） | 0 warning、**18/18**（`toml_unit` 15 + `toml_perf` 3，没有任何 TU 包含 JSON 头） |
+| `CODEC_BUILD_TOML=OFF` | 0 warning、**181/181** |
+| 断言审计 `node build/phase1/assert_audit.js` | `NO ASSERTION WAS WEAKENED OR REMOVED`（审计脚本增加了 `jsonView(X) → X`、`jsonView(*X).y → X->y` 的归一化，否则 41 条"只是改了写法"的断言会被误报为缺失） |
+
+**已知遗留**：`prototype/generic_ops.hpp`（`CODEC_BUILD_PROTOTYPE=ON`，默认关）仍 include
+核并使用 JSON 类型，因此在这个配置下不再能编译。它本来就是"阶段 4 收尾时删除"的实验产物，
+按要求没有改动它；把它删掉或改成 include `codec_json.hpp` 都只是一行的事。
+
+## 5. 阶段（每阶段门禁：全绿 + perf 复测）
+
+改动面（按段量化，`JsonValue` 出现次数，切分前的口径）：
 
 | 区域 | 次数 | 处理 |
 | --- | ---: | --- |
@@ -320,9 +364,10 @@ TOML 之所以没暴露它，只是因为 `TomlOps` 恰好覆写了 `mapBuilder`
 | 阶段 | 内容 | 门禁 | 状态 |
 | --- | --- | --- | --- |
 | 1 | 4–5 段 + 6–8 段改签名；`JsonOps` 装箱/拆箱；`JsonValue` 公开 API 不变 | 174 + perf ≤5 % | **完成**（174/174；绝对性能持平，见 §4.2） |
-| 2 | `Passthrough` → `Codec<Dynamic>`；`models/risk_def.hpp` 的 `value` 成员跟进；`Dynamic` 类型落地 | 全绿 | **完成**（181/181；`Passthrough` 严格照 `Codec.java:197-224`；新增 `test/unit/dynamic_test.cpp` 7 个用例；头文件里 `value.asJson()` 调用点 43 → **0**） |
+| 2 | `Passthrough` → `Codec<Dynamic>`；`models/risk_def.hpp` 的 `value` 成员跟进；`Dynamic` 类型落地 | 全绿 | **完成**（181/181；`Passthrough` 严格照 `Codec.java:197-224`；新增 `test/unit/dynamic_test.cpp` 7 个用例；头文件里 `jsonView(value)` 调用点 43 → **0**） |
 | 3 | `TomlOps`（[tinytoml](https://github.com/mayah/tinytoml) v0.4，用户指定）实现 ops；「同一 codec 吃 JSON/TOML → 同结构」交叉用例；`convertTo` 变成真转换；通用代码里最后两处 JSON 假设改成 ops 级钩子；TOML 侧 mutable 构造器（修掉验收发现的 O(N²) 编码） | 新增用例 | **完成**（203/203；新增 `include/codec_toml.hpp` + 15 个 unit + 4 个 smoke + 3 个 perf 用例；`CODEC_BUILD_TOML` 可选层；`getMap` 改纯虚、新增 `isStringKey` 钩子、通用 `UniversalListBuilder`；性能见 §4.3、§4.4，另修掉通用累加器的 JSON 假设见 §4.5） |
 | 4 | 文档：格式支持矩阵、§7 性能重测、删除原型与本文档的实验章节 | — | 待做 |
+| 5 | **把 JSON 层从核切出去**：新增 `codec_json.hpp`（JsonValue / JsonOps / 构造器 / 互操作钩子），核只留 `Number` + ops 接口 + codec 层；`CODEC_BUILD_JSON` + `codec_json` 目标；`toml_ops_test` / `toml_perf_test` 做成 JSON-free；新增 `docs/adding_a_format.md` | 核里 `JsonValue`/`nlohmann` 0 命中；无 nlohmann 配置全绿 | **完成**（203/203；`codec.hpp` 5 001 → 4 017 行，`codec_json.hpp` 1 063 行；无 JSON 配置 18/18，TOML=OFF 181/181；详见 §4.6） |
 
 阶段 1 实际做出来时比原计划多做了 6–8 段（原本排在阶段 2），并顺带补了两件今天缺的东西：
 
@@ -351,13 +396,18 @@ TOML 之所以没暴露它，只是因为 `TomlOps` 恰好覆写了 `mapBuilder`
   错误定位 `risks[3].condition.or[0].op`、可点击栈帧、`CodecError`/`throwIfError`；
   `codec.parse(JsonOps::INSTANCE, JsonValue::parse(text))` 也不用改（`JsonValue → Value` 隐式）。
 * **阶段 1 已经变的**：`encodeStart` 现在返回 `DataResult<Value>`（配 JsonOps 时用
-  `result()->asJson()` 取回 JSON 节点）；`DynamicOps`/`MapLike`/builder 的签名收发 `Value`。
+  `jsonView(result())` 取回 JSON 节点）；`DynamicOps`/`MapLike`/builder 的签名收发 `Value`。
   两份 README 的示例与"值类型"章节已同步。
 * **阶段 2 已经改的**：`codecs::Passthrough` 现在是 `Codec<Dynamic>`，因此
   `models/risk_def.hpp` 的 `std::optional<JsonValue> value` 变成了
   `std::optional<Dynamic> value`；渲染动态值请用
-  `value->ops().toString(value->value())`（示例里就是这么做的，输出文本不变），
-  `Value::asJson()` 仍然保留，但只作为 JSON 的逃生口（库内部已无调用点）。
+  `value->ops().toString(value->value())`（示例里就是这么做的，输出文本不变）。
+* **阶段 5 的破坏性变更（include 与取值写法）**：JSON 使用者现在 include
+  `codec_json.hpp`（或链接 `codec::json`）；`Value::asJson()` 这个成员没有了，改成自由函数
+  `jsonView(value)`（`x->asJson()` → `jsonView(*x)`）。只 include `codec.hpp` 仍然可用，
+  但那时没有 `JsonOps`/`JsonValue` —— 那正是"只用核 + 别的格式"的场景。
+* **阶段 5 新增**：`include/codec_json.hpp` 入口头、`codec_json` / `codec::json` 目标、
+  `CODEC_BUILD_JSON` 选项、`docs/adding_a_format.md`；`codec_toml.hpp` 不再依赖 JSON。
 * **阶段 3 新增**：`include/codec_toml.hpp`（独立可选层，`CODEC_BUILD_TOML` / `codec_toml`
   目标）提供 `TomlDocument`、`parseToml`、`TomlOps::INSTANCE`、`dumpToml`；同一批 codec 可直接
   喂 `TomlOps`，`convertTo` 双向可用，`Dynamic`/`Passthrough` 能在格式间搬运。
@@ -378,7 +428,9 @@ TOML 之所以没暴露它，只是因为 `TomlOps` 恰好覆写了 `mapBuilder`
 | 跨格式误用句柄（静默 UB） | 保留 32 字节标签；`convertTo` 一律经 `outOps` 重建 |
 | 临时量生命周期 | §4.1 第 1 条写进规范；考虑让 `getMap`/`getList` 返回共享句柄而不是按值 `vector` |
 | 压缩 ops / `KeyCompressor`（NBT 风格） | 键也是 `Value`；阶段 1 后 `dynamic_ops_test` 仍全绿（97 条断言未变） |
-| 通用代码里残留 JSON 假设 | 已清零：`getMap` 纯虚 + `isStringKey` 钩子（阶段 3），头文件里 `value.asJson()` 调用点 0 处 |
+| 通用代码里残留 JSON 假设 | 已清零：`getMap` 纯虚 + `isStringKey` 钩子（阶段 3）、4 段散件搬走或泛化（阶段 5，§4.6），核里 `JsonValue`/`nlohmann` 0 命中 |
+| 核被某个格式"粘住" | 已清零：核目标不带任何第三方 include 路径；`CODEC_BUILD_JSON=OFF` + 藏掉 nlohmann 的构建 18/18 全绿（§4.6） |
+| 格式入口头互相污染 | 入口头只 include `codec.hpp` + 自己的库；交叉格式走 `convertTo`，不靠 include |
 | perf 数字本身不可靠 | 阶段 3 证明"隔离解码"的 ±3 % 可能只是代码布局（§4.3）；结论以同源 A/B + 端到端指标为准，README §7 已补这条方法论 |
 | 编译时间 | 擦除方案不增加模板实例化，应基本不变（这也是不选 B1 的理由之一） |
 

@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "codec.hpp"
+#include "codec_json.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -179,9 +179,10 @@ TEST(SmokeTest, CompressedAndPlainOpsAgree) {
       payloadCodec().encodeStart(JsonOps::COMPRESSED, payload);
   ASSERT_TRUE(compressed.result().has_value()) << compressed.message();
   // Compressed records become key-indexed lists.
-  EXPECT_TRUE(compressed.result()->asJson().isArray()) << compressed.result()->asJson().dump();
+  EXPECT_TRUE(jsonView(*compressed.result()).isArray()) << jsonView(*compressed.result()).dump();
 
-  const Payload restored = decode(payloadCodec(), compressed.result()->asJson().dump(), JsonOps::COMPRESSED);
+  const Payload restored =
+      decode(payloadCodec(), jsonView(*compressed.result()).dump(), JsonOps::COMPRESSED);
   EXPECT_EQ(restored, payload);
 
   // Compressed ops expect a list, not an object.

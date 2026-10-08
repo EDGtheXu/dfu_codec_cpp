@@ -9,7 +9,7 @@
 //     addresses with the ones it sees itself.
 #include <string>
 
-#include "codec.hpp"
+#include "codec_json.hpp"
 #include "risk_def.hpp"
 
 namespace codec_odr {

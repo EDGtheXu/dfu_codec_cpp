@@ -11,7 +11,11 @@
 `reference/dfu-6.0.8/`。这些源码属于 Mojang，仅作阅读参考——不参与构建，也刻意
 不纳入版本管理——脚本的作用是让本次移植的来源可复现。
 
-* 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 5 000 行，CMake `INTERFACE` 目标，无需编译任何源文件；可选的 TOML 层是另一个单头文件 [`include/codec_toml.hpp`](include/codec_toml.hpp)（约 730 行）
+* **每种格式一个入口头**，include 即用：
+  * [`include/codec.hpp`](include/codec.hpp)——**核**（约 4 000 行）：擦除值句柄、`DynamicOps`/`MapLike`/构造器接口、`Codec`/`MapCodec` 层、`DataResult`/`Lifecycle`、诊断与 `Number`。**不认识任何格式，也不依赖任何序列化库**：没有 JSON 库的机器上照样能构建。
+  * [`include/codec_json.hpp`](include/codec_json.hpp)——JSON：`JsonValue`（基于 nlohmann/json 的引用语义句柄）、`JsonParseError`、`JsonOps`（`INSTANCE` / `COMPRESSED`）。
+  * [`include/codec_toml.hpp`](include/codec_toml.hpp)——TOML：`TomlDocument`、`parseToml`、`TomlOps`、`dumpToml`。
+  加一种格式 = 再写一个 `DynamicOps` + 一个入口头，契约清单见 [`docs/adding_a_format.md`](docs/adding_a_format.md)。
 * 头文件内的注释为**中文**；API 名、错误消息、测试名与两份 README 保持中英各自原本的语言
 * 分层测试：[`test/unit/`](test/unit)（155 个用例）、[`test/smoke/`](test/smoke)
   （23 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
@@ -23,7 +27,7 @@
 * 可运行示例：[`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
 ```cpp
-#include "codec.hpp"
+#include "codec_json.hpp"   // JSON 入口头（连带核）
 
 struct RiskDef {
   std::string id;
@@ -41,20 +45,21 @@ Codec<RiskDef> RiskDefCodec = record<RiskDef>(
 // decode / encode
 DataResult<RiskDef> decoded = RiskDefCodec.parse(JsonOps::INSTANCE, JsonValue::parse(text));
 DataResult<Value> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, value);
-// `Value` 是 ops 层格式无关的值句柄；配 JsonOps 时用 encoded.result()->asJson() 取回 JSON 节点
+// `Value` 是 ops 层格式无关的值句柄；JSON 侧用 jsonView(*encoded.result()) 取回 JSON 节点
+// （核里没有 JSON 的名字，所以这个入口在 codec_json.hpp 里）
 ```
 
 ---
 
 ## 1. 依赖与构建
 
-| 依赖 | 版本 | 位置 |
-| --- | --- | --- |
-| C++ | **C++17**（`/std:c++17`、`-std=c++17`） | 必需（C++20/23 可解锁下面可选的诊断能力） |
-| [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0（单头文件） | `third_party/nlohmann/json.hpp` |
-| [GoogleTest](https://github.com/google/googletest) | 1.17.0 | `third_party/googletest-1.17.0`（仅测试用） |
-| [tinytoml](https://github.com/mayah/tinytoml) | v0.4 | `third_party/tinytoml`（仅可选的 TOML 层用） |
-| CMake | ≥ 3.16，Ninja 或 MSBuild | 构建 |
+| 依赖 | 版本 | 位置 | 谁需要 |
+| --- | --- | --- | --- |
+| C++ | **C++17**（`/std:c++17`、`-std=c++17`） | 必需（C++20/23 可解锁下面可选的诊断能力） | 全部 |
+| [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0（单头文件） | `third_party/nlohmann/json.hpp` | 只有 `codec_json.hpp`——可选 |
+| [tinytoml](https://github.com/mayah/tinytoml) | v0.4 | `third_party/tinytoml` | 只有 `codec_toml.hpp`——可选 |
+| [GoogleTest](https://github.com/google/googletest) | 1.17.0 | `third_party/googletest-1.17.0` | 仅测试用 |
+| CMake | ≥ 3.16，Ninja 或 MSBuild | 构建 | 构建 |
 
 库本身是 header-only，没有什么需要配置的；但由于头文件注释是中文，**在这个工程的
 CMake 目标之外**直接用 MSVC 编译时需要 `/utf-8`（或 `/source-charset:utf-8`）——
@@ -77,6 +82,10 @@ ctest --test-dir build --output-on-failure   # 全部测试层，203 个用例
 cmake --build build --target check           # 等价的一键目标
 build/examples/risk_def_example.exe          # 可选：示例文档演示
 
+# 只要核 + TOML（机器上完全没有 JSON 库也能构建）：
+cmake -S . -B build-nojson -G Ninja -DCMAKE_BUILD_TYPE=Release -DCODEC_BUILD_JSON=OFF
+cmake --build build-nojson && ctest --test-dir build-nojson   # 18 个用例（TOML unit + perf）
+
 # 可选：为每个错误额外抓取真正的 std::stacktrace（会把构建切到 C++23）
 cmake -S . -B cmake-build-stacktrace -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEC_RECORD_STACKTRACE=ON
 ```
@@ -84,19 +93,20 @@ cmake -S . -B cmake-build-stacktrace -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEC_R
 | CMake 选项 | 默认 | 作用 |
 | --- | --- | --- |
 | `CODEC_BUILD_TESTS` | `ON` | 构建各测试层 |
-| `CODEC_BUILD_EXAMPLES` | `ON` | 构建示例程序 |
+| `CODEC_BUILD_EXAMPLES` | `ON` | 构建示例程序（需要 JSON 层） |
 | `CODEC_WARNINGS_AS_ERRORS` | `OFF` | `/WX`、`-Werror` |
 | `CODEC_RECORD_STACKTRACE` | `OFF` | 定义 `CODEC_RECORD_STACKTRACE`、按 C++23 编译，并为每个错误抓取 `std::stacktrace` |
-| `CODEC_BUILD_TOML` | `ON` | 构建可选的 TOML 层（`codec_toml` 目标 + 它的两个测试可执行文件）；需要 `third_party/tinytoml` |
+| `CODEC_BUILD_JSON` | `ON` | 构建 JSON 入口头（`codec_json` 目标 + JSON 测试层）；需要 `third_party/nlohmann/json.hpp` |
+| `CODEC_BUILD_TOML` | `ON` | 构建 TOML 入口头（`codec_toml` 目标 + 它的测试可执行文件）；需要 `third_party/tinytoml` |
 
 每个测试层都是独立的可执行文件，因此也可以直接运行：
 
 ```powershell
-build/test/unit/codec_unit_tests.exe          [--gtest_filter=RecordCodecTest.*]
+build/test/unit/codec_unit_tests.exe          [--gtest_filter=RecordCodecTest.*]     # JSON 层
 build/test/smoke/codec_smoke_tests.exe        [--gtest_filter=SmokeTest.*]
 build/test/perf/codec_perf_tests.exe          [--gtest_filter=PerfTest.SmallDocument]  # 打印表格
-build/test/codec_toml_unit_tests.exe          [--gtest_filter=TomlOpsTest.*]          # TOML 层
-build/test/codec_toml_smoke_tests.exe         [--gtest_filter=TomlRiskDefTest.*]
+build/test/codec_toml_unit_tests.exe          [--gtest_filter=TomlOpsTest.*]          # TOML 层（JSON-free）
+build/test/codec_toml_smoke_tests.exe         [--gtest_filter=TomlRiskDefTest.*]      # JSON ↔ TOML 交叉
 build/test/codec_toml_perf_tests.exe          [--gtest_filter=TomlPerfTest.SmallDocument]  # 打印表格
 ```
 
@@ -104,8 +114,9 @@ build/test/codec_toml_perf_tests.exe          [--gtest_filter=TomlPerfTest.Small
 配置后，所有用例都会出现在 Run/Debug 下拉框中——`All CTest` 一键运行全部测试层，
 `unit.*` / `smoke.*` / `perf.*` / `toml_unit.*` / `toml_smoke.*` / `toml_perf.*`
 按层分组，每个 `TEST(...)`（包括每个基准测试夹具）都可单独运行或调试；目标列表里
-还有 `check` 目标。两个性能层各自校准迭代次数（Release 下 JSON 层约 6.4 秒、TOML 层
-约 5.6 秒，Debug 下约一半）；`ctest -R perf -V` 可以打印它们的表格。
+还有 `check` 目标（它只依赖当前配置下存在的层）。两个性能层各自校准迭代次数
+（Release 下 JSON 层约 6.4 秒、TOML 层约 5.6 秒，Debug 下约一半）；
+`ctest -R perf -V` 可以打印它们的表格。
 
 测试套件已在 **MSVC 14.44（VS2022 / CLion）Debug** 与
 **MSVC 14.50（VS2026）Release** 下验证通过。
@@ -117,30 +128,45 @@ build/test/codec_toml_perf_tests.exe          [--gtest_filter=TomlPerfTest.Small
 > `const std::string text = R"(...)"; EXPECT_EQ(f(text), ...)`，参见
 > `test/unit/json_test.cpp`。像 `R"({"a":1})"` 这样不含反斜杠的原始字符串不受影响。
 
-CMake 选项：`CODEC_BUILD_TESTS`、`CODEC_BUILD_EXAMPLES`、
-`CODEC_WARNINGS_AS_ERRORS`、`CODEC_RECORD_STACKTRACE`、`CODEC_BUILD_TOML`。库目标名为
-`codec`（别名 `codec::codec`），链接它并 `#include "codec.hpp"` 即可。可选的 TOML 层
-是独立目标 `codec_toml`（`#include "codec_toml.hpp"`），它链接 `codec` 并加上 tinytoml
-的 include 目录——核心头文件永远不会看到 tinytoml。
+### 每种格式一个入口头
 
-### 仅头文件，且只有一个文件
-
-整个库就是 [`include/codec.hpp`](include/codec.hpp)：没有翻译单元、没有生成文件，
-CMake 目标是 `INTERFACE` 库，因此不需要编译、链接、安装，也不存在 ABI 兼容问题。
-接入成本就是一条 `target_link_libraries`：
+链接你要用的格式目标即可；每个目标只带自己那个库的 include 目录，**核目标一个都不带**：
 
 ```cmake
-add_subdirectory(path/to/Codec)                     # 或用 FetchContent_Declare(...)
-target_link_libraries(my_app PRIVATE codec::codec)  # 附带 include/、third_party/ 与 C++17
+add_subdirectory(path/to/Codec)                      # 或用 FetchContent_Declare(...)
+target_link_libraries(my_app PRIVATE codec::json)    # include/ + third_party/ + C++17，#include "codec_json.hpp"
+target_link_libraries(my_app PRIVATE codec::toml)    # include/ + tinytoml，          #include "codec_toml.hpp"
+target_link_libraries(my_app PRIVATE codec::codec)   # 只带 include/：核，不含任何格式
 ```
 
-文件内部按依赖顺序划分为 8 个带注释的小节——`json`、`lifecycle`、`data_result`、
-`dynamic_ops`、`json_ops`、`codec`、`codecs`、`record_codec`——因此依然便于导航
-（搜索 `// 3/8  data_result` 即可跳转）；要把库拷进别的工程，只需要这一个文件加上
-nlohmann/json。
+* `codec`（别名 `codec::codec`）——核：`Value`、`DynamicOps`、`Codec`/`MapCodec`、
+  `DataResult`/`Lifecycle`、诊断、`Number`。里面的一切都格式无关，这一点由仓库里的
+  grep 断言（`include/codec.hpp` 里 `JsonValue` 与 `nlohmann` 各出现 **0** 次）和
+  `-DCODEC_BUILD_JSON=OFF` 构建（把 `third_party/nlohmann/json.hpp` 改名后仍能编译并跑通
+  TOML 测试）双重守着。
+* `codec_json`（别名 `codec::json`）——`#include "codec_json.hpp"`：`JsonValue`、
+  `JsonParseError`、`JsonOps`（`INSTANCE` / `COMPRESSED`），以及核里放不下的两个互操作入口：
+  `JsonValue::operator Value()`（隐式转换，`codec.parse(JsonOps::INSTANCE, JsonValue::parse(text))`
+  照旧可写）与 `jsonView(const Value&)`（把句柄取回成 JSON 节点）。
+* `codec_toml`（别名 `codec::toml`）——`#include "codec_toml.hpp"`：`TomlDocument`、
+  `parseToml`、`TomlOps::INSTANCE`、`dumpToml`。它只 include `codec.hpp` 与 tinytoml。
+
+核头文件**不会** include 任何入口头（伞头会把 nlohmann 又拖回纯核构建），入口头之间也
+互不 include。
+
+### 仅头文件，每种格式一个文件
+
+没有翻译单元、没有生成文件，每个入口头都是 `INTERFACE` CMake 目标，因此不需要编译、
+链接、安装，也不存在 ABI 兼容问题。
+
+核内部按依赖顺序划分为 **7 个**带注释的小节——`number`、`lifecycle`、`data_result`、
+`dynamic_ops`、`codec`、`codecs`、`record_codec`——因此依然便于导航
+（搜索 `// 3/7  data_result` 即可跳转）；要把核拷进别的工程，只需要这一个文件。
+`codec_json.hpp` 加上 JSON 值类型与 `JsonOps`，`codec_toml.hpp` 加上 TOML 的那一套，
+两者都是只 include `codec.hpp` 的普通头文件。
 
 命名空间作用域下的一切要么是 `inline` 函数、要么是模板、要么是 inline 变量
-（`JsonOps::INSTANCE`、`codecs::Int` 等），因此可以放心地在任意多个翻译单元里包含这个
+（`JsonOps::INSTANCE`、`codecs::Int` 等），因此可以放心地在任意多个翻译单元里包含这些
 头文件，单例也确实是共享的：
 
 * `test/unit/odr_probe.cpp` 是第二个翻译单元，它包含了这个头文件（外加
@@ -150,15 +176,17 @@ nlohmann/json。
   地址，从而抓住"某个定义悄悄变成翻译单元内部链接"的情况。把 `codecs::Int` 前的
   `inline` 改成 `static`，这两个测试都会失败；
 * `test/unit/header_self_contained_test.cpp` 在**任何其他头文件之前**（包括
-  GoogleTest）包含 `codec.hpp`，因此这个头文件无法从别处借用任何声明；
-* 另有 8 个翻译单元只包含它这一个库头文件。
+  GoogleTest）包含 `codec_json.hpp`，因此两个入口头都无法从别处借用任何声明；
+* 另有 8 个翻译单元只包含库头文件。
 
-核心头文件唯一的编译期依赖是 [nlohmann/json](#关于-json-值类型)（`third_party/` 下的单头
-文件，也可以换成你自己 include 路径上的副本）；测试额外需要 GoogleTest，而 `INTERFACE`
-目标不会把它传递出去。可选的 TOML 层只会再加一个依赖：tinytoml，而且只属于 `codec_toml`
-——见 [TOML 层](#toml-层codec_tomlhpp可选)。
+**核本身除标准库外零依赖**，而且这不是口头保证：`include/codec.hpp` 里 `JsonValue` 与
+`nlohmann` 各出现 0 次，并且把 `third_party/nlohmann/json.hpp` 改名后用
+`-DCODEC_BUILD_JSON=OFF` 仍能构建并跑通 TOML 测试。每个入口头只额外带自己那个库：
+[`codec_json.hpp`](#关于-json-值类型codec_jsonhpp) 要 nlohmann/json，
+[`codec_toml.hpp`](#toml-层codec_tomlhpp可选) 要 tinytoml。测试另外需要 GoogleTest，
+而 `INTERFACE` 目标不会把它传递出去。
 
-### 关于 JSON 值类型
+### 关于 JSON 值类型（`codec_json.hpp`）
 
 DFU 的 `JsonOps` 基于 Gson 的 `JsonElement`。本移植改用 **nlohmann/json**，具体是
 `nlohmann::ordered_json`，从而保证：
@@ -179,9 +207,17 @@ DFU 的 `JsonOps` 基于 Gson 的 `JsonElement`。本移植改用 **nlohmann/jso
 `JsonValue` 之上是 ops 层自己的值类型 `codec::Value`：一个格式无关的句柄
 （共享所有者 + 节点指针 + 类型标签），所有 `DynamicOps` 实现都用它收发值，因此第二
 种格式的 ops 可以**原样**插进同一批 codec——下面的 TOML 层就是这么做的。配 `JsonOps`
-时载荷就是 `JsonValue` 节点，用 `value.asJson()` 取回即可；这次擦除的代价测不出来：
+时载荷就是 `JsonValue` 节点，用 `jsonView(value)` 取回即可；这次擦除的代价测不出来：
 2 风险项 codec 解码 **15 423 ns**，改动前的同机基线是 15 500 ns（见 §7 与
 [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)）。
+
+跨这层擦除的两个方向都定义在这个头文件里，因为核里叫不出这两个类型的名字：
+
+```cpp
+JsonValue document = JsonValue::parse(text);
+const Value handle = document;            // JsonValue::operator Value()：隐式
+const JsonValue back = jsonView(handle);  // Value -> JsonValue（不是 JSON 节点时抛）
+```
 
 ```cpp
 JsonValue value = nlohmann::ordered_json::parse(text);   // 隐式转换
@@ -261,24 +297,28 @@ const DataResult<std::string> encoded = codec::dumpToml(encodedValue.result());
 ## 2. 目录结构
 
 ```
-include/codec.hpp      整个库，按依赖顺序分为 8 个带注释的小节：
-                         1 json          JsonValue（底层为 nlohmann）+ Number（对应 java.lang.Number）
+include/codec.hpp      核，按依赖顺序分为 7 个带注释的小节（不含任何格式、零依赖）：
+                         1 number        Number（对应 java.lang.Number）
                          2 lifecycle     Lifecycle
                          3 data_result   DataResult、PartialResult 语义、Unit
                          4 dynamic_ops   DynamicOps、MapLike、RecordBuilder、ListBuilder、KeyCompressor
-                         5 json_ops      JsonOps（INSTANCE / COMPRESSED）
-                         6 codec         Encoder、Decoder、MapEncoder、MapDecoder、Codec、MapCodec
-                         7 codecs        基础与组合 codec、范围校验、recursive、dispatch
-                         8 record_codec  RecordCodecBuilder：record<>、fieldOf、optionalFieldOf、forGetter
-models/risk_def.hpp    风险定义用例（RiskDef/Condition 的 codec）
+                         5 codec         Encoder、Decoder、MapEncoder、MapDecoder、Codec、MapCodec
+                         6 codecs        基础与组合 codec、范围校验、recursive、dispatch
+                         7 record_codec  RecordCodecBuilder：record<>、fieldOf、optionalFieldOf、forGetter
+include/codec_json.hpp JSON 入口头：JsonValue、JsonParseError、JsonOps（INSTANCE / COMPRESSED）、
+                       jsonView()、JsonValue::operator Value()（需要 third_party/nlohmann）
+include/codec_toml.hpp TOML 入口头：TomlDocument、parseToml、TomlOps、dumpToml
+                       （再一个 DynamicOps；需要 third_party/tinytoml，codec.hpp 永不 include 它）
+docs/adding_a_format.md 新格式入口头的契约清单（以 codec_toml.hpp 为范例）
+models/risk_def.hpp    风险定义用例（RiskDef/Condition 的 codec）——只依赖核
 test/
   CMakeLists.txt       定义各测试层与一键 `check` 目标
-  support/             共享测试辅助（test_support.hpp）
+  support/             共享测试辅助（test_support.hpp —— JSON 辅助）
   unit/                codec_unit_tests   -- 组件级测试套件（含 ODR 守护）
   smoke/               codec_smoke_tests  -- 端到端 API 检查
   perf/                codec_perf_tests   -- codec 与 nlohmann/json 的性能测量
   unit/toml_ops_test.cpp, smoke/toml_risk_def_test.cpp, perf/toml_perf_test.cpp
-                       -- TOML 层的三个可执行文件
+                       -- TOML 层的三个可执行文件（unit 与 perf 是 JSON-free 的）
 examples/              risk_def_main.cpp
 reference/dfu-6.0.8/   反编译得到的 Java 原始代码（仅供阅读）
 third_party/           nlohmann/json、googletest、tinytoml
@@ -582,9 +622,15 @@ Codec<Condition> conditionCodec() {
 
 ## 6. 测试分层
 
-203 个 GoogleTest 用例分布在六个独立可执行文件中。`ctest` 会为每个用例加上所属层的
-前缀（`unit.*`、`smoke.*`、`perf.*`、`toml_unit.*`、`toml_smoke.*`、`toml_perf.*`），
-因此任何一层都可以按组选择运行。
+203 个 GoogleTest 用例分布在六个独立可执行文件中（下面表格的最后一列写明是哪一个）。
+`ctest` 会为每个用例加上所属层的前缀（`unit.*`、`smoke.*`、`perf.*`、`toml_unit.*`、
+`toml_smoke.*`、`toml_perf.*`），因此任何一层都可以按组选择运行。
+
+哪些层存在取决于配置：**JSON** 层（`codec_unit_tests`、`codec_smoke_tests`、
+`codec_perf_tests`，以及跨格式的 `codec_toml_smoke_tests`）需要 `CODEC_BUILD_JSON=ON`；
+**TOML** 层需要 `CODEC_BUILD_TOML=ON`。用 `-DCODEC_BUILD_JSON=OFF` 时只剩
+`codec_toml_unit_tests`（15 个用例）与 `codec_toml_perf_tests`（3 个）——共 18 个，
+且没有任何一个包含 JSON 头文件，所以那个配置是"核 + 一种格式"的真实覆盖，而不是空构建。
 
 **`test/unit/` → `codec_unit_tests`（155 个用例）**——组件级，覆盖各种边界情况：
 
@@ -603,7 +649,7 @@ Codec<Condition> conditionCodec() {
 | `error_path_test.cpp` | 错误定位：目标格式 `risks[3].condition.or[0].op`、改写消息措辞、嵌套列表、多字段同时失败、缺失键、无界 map、dispatch 载荷、编码侧、严格/宽松可选字段对比；`FrameTest` 固定 `report()` 的 codec 调用链、每帧的 `file(line)` 构造位置与两种排版，`CodecErrorTest` 覆盖 `throwIfError()` / `getOrThrow()` |
 | `stacktrace_test.cpp` | 可选的 `std::stacktrace` 层：特性探测一致性、抓栈与标准库排版输出；未打开 `CODEC_RECORD_STACKTRACE` 时跳过自己 |
 | `odr_test.cpp` + `odr_probe.cpp` | 仅头文件保证：两个都包含该单头文件的翻译单元能一起链接，且 inline 单例在两个 TU 中地址一致 |
-| `header_self_contained_test.cpp` | 在其余所有头文件之前包含 `codec.hpp`，证明单头文件可独立编译 |
+| `header_self_contained_test.cpp` | 在其余所有头文件之前包含 `codec_json.hpp`，证明两个入口头都能独立编译 |
 
 **`test/smoke/` → `codec_smoke_tests`（23 个用例）**——小而快的端到端检查，回答
 "这个移植到底能不能用"：
@@ -621,16 +667,21 @@ Codec<Condition> conditionCodec() {
 | `codec_perf_test.cpp` | 手写 nlohmann 提取器/构建器，外加 nlohmann 自带的 ADL 映射（`from_json` + `get<T>()`），与 Codec 层在 2 风险与 400 风险文档上的计时对比；打印第 7 节的表格 |
 
 共享辅助代码位于 `test/support/test_support.hpp`（JSON 解析，以及会把 codec 错误
-消息作为失败原因抛出的 `decode` / `encode` / `decodeError` 包装）。
+消息作为失败原因抛出的 `decode` / `encode` / `decodeError` 包装）；它 include 的是
+`codec_json.hpp`，因此只属于 JSON 层。
 
-**TOML 层有自己的三个可执行文件**（仅在 `CODEC_BUILD_TOML=ON` 时构建，这样其余测试层
-完全不需要 tinytoml 依赖）：
+**TOML 层有自己的三个可执行文件**（`CODEC_BUILD_TOML=ON`，这样 JSON 层完全不需要
+tinytoml 依赖）：
 
-| 文件 | 关注点 |
-| --- | --- |
-| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests`（15 个用例） | 把 `TomlOps` 当作 `DynamicOps` 来用：按类型读取标量、`BooleanIsNotANumber`、时间按字符串读、字面键 `"a.b"` 走 `findChild`、类型严格的相等、`convertTo` 双向（以及同 ops 恒等）、`dumpToml` 拒绝非表根 / `null` / 混型数组、解析错误带 `line 2`、v0.4 的边界（点号键、混型数组、本地时间）、空文档、严格键的列表/表合并；以及编码用的构造器（`TomlListBuilder`/`TomlRecordBuilder`）：并入前缀而不改动前缀、累加器复用、重复键 last-wins、`add`/`withErrorsFrom`/`mapError` 的错误传播、非字符串键、混进来的 JSON 句柄 |
-| `smoke/toml_risk_def_test.cpp` → `codec_toml_smoke_tests`（4 个用例） | **同一个** `RiskDocumentCodec` 同时吃 TOML 与 JSON（解出的结构完全相同）、dump → 重新解析稳定、`Passthrough` 的 `Dynamic` 从 JSON 搬到 TOML 再搬回来、TOML 值转回 JSON |
-| `perf/toml_perf_test.cpp` → `codec_toml_perf_tests`（3 个用例） | TOML 层的代价：`parseToml`、解析+解码、已解析解码、编码、编码+`dumpToml`、双向 `convertTo`，以及 `per-risk encode`——防止编码重新退回通用构造器的可见性守卫（见 §7） |
+| 文件 | 关注点 | 何时构建 |
+| --- | --- | --- |
+| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests`（15 个用例） | 把 `TomlOps` 当作 `DynamicOps` 来用：按类型读取标量、`BooleanIsNotANumber`、时间按字符串读、字面键 `"a.b"` 走 `findChild`、类型严格的相等、`convertTo` 双向（以及同 ops 恒等）、`dumpToml` 拒绝非表根 / `null` / 混型数组、解析错误带 `line 2`、v0.4 的边界（点号键、混型数组、本地时间）、空文档、严格键的列表/表合并；以及编码用的构造器（`TomlListBuilder`/`TomlRecordBuilder`）：并入前缀而不改动前缀、累加器复用、重复键 last-wins、`add`/`withErrorsFrom`/`mapError` 的错误传播、非字符串键、混进来的 JSON 句柄 | TOML（JSON-free） |
+| `smoke/toml_risk_def_test.cpp` → `codec_toml_smoke_tests`（4 个用例） | **同一个** `RiskDocumentCodec` 同时吃 TOML 与 JSON（解出的结构完全相同）、dump → 重新解析稳定、`Passthrough` 的 `Dynamic` 从 JSON 搬到 TOML 再搬回来、TOML 值转回 JSON | TOML **且** JSON |
+| `perf/toml_perf_test.cpp` → `codec_toml_perf_tests`（3 个用例） | TOML 层的代价：`parseToml`、解析+解码、已解析解码、编码、编码+`dumpToml`、（有 JSON 时）双向 `convertTo` 与 JSON 对照行，以及 `per-risk encode`——防止编码重新退回通用构造器的可见性守卫（见 §7） | TOML（JSON-free） |
+
+那两个 JSON-free 的文件只在 `#ifdef CODEC_TEST_WITH_JSON` 里碰 JSON，而这个宏由 CMake 在
+构建 JSON 层时定义——`-DCODEC_BUILD_JSON=OFF` 配置因此是真的可测。跨格式冒烟是例外：
+同一 codec 跑两种格式本来就需要两者都在。
 
 TOML 性能层刻意做成独立可执行文件：往 `codec_perf_tests` 里加用例会扰动它已记录的 JSON
 数字（仅代码布局就有约 3 % 的影响，见 §7），也会把 tinytoml 拖进核心性能二进制。

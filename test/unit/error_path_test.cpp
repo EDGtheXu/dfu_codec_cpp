@@ -23,7 +23,7 @@
 #include <string_view>
 #include <vector>
 
-#include "codec.hpp"
+#include "codec_json.hpp"
 #include "risk_def.hpp"
 #include <gtest/gtest.h>
 

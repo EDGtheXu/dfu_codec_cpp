@@ -4,7 +4,7 @@
 // other unit suites pull in GoogleTest first, via test_support.hpp), so the header
 // has to compile with no help from anything else.  It also deliberately avoids the
 // test helpers, so nothing but codec.hpp is required.
-#include "codec.hpp"
+#include "codec_json.hpp"
 
 #include <string>
 
@@ -37,7 +37,7 @@ TEST(HeaderSelfContainedTest, CompilesAndWorksWithOnlyTheSingleHeader) {
   const codec::DataResult<codec::Value> encoded =
       namedCodec().encodeStart(codec::JsonOps::INSTANCE, *decoded.result());
   ASSERT_TRUE(encoded.result().has_value()) << encoded.message();
-  EXPECT_EQ(encoded.result()->asJson().dump(), R"({"name":"a","count":2})");
+  EXPECT_EQ(jsonView(*encoded.result()).dump(), R"({"name":"a","count":2})");
 
   // The error path works too, without any test-helper machinery.
   const codec::DataResult<Named> failed = namedCodec().parse(

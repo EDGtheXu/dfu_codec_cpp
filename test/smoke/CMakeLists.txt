@@ -11,6 +11,7 @@ add_executable(codec_smoke_tests
 )
 
 codec_configure_test(codec_smoke_tests)
+target_link_libraries(codec_smoke_tests PRIVATE codec_json)
 
 gtest_discover_tests(codec_smoke_tests
   TEST_PREFIX "smoke."

@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "codec.hpp"
+#include "codec_json.hpp"
 #include "test_support.hpp"
 #include <gtest/gtest.h>
 

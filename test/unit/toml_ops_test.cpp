@@ -1,23 +1,28 @@
 // TomlOps —— 用 tinytoml 实现的第二种 DynamicOps。
 //
-// 覆盖类型映射、与 JsonOps 的**按格式**差异（布尔不是数字、相等是类型严格的）、
+// 覆盖类型映射、与 JSON 的**按格式**差异（布尔不是数字、相等是类型严格的）、
 // 字面点号键必须走 findChild、跨格式 convertTo、dumpToml 写出前的校验，以及
 // 编码用的 mutable 构造器（TomlListBuilder / TomlRecordBuilder）的累加与错误语义。
+//
+// **本文件不依赖 JSON**：没有 nlohmann 的配置（-DCODEC_BUILD_JSON=OFF）也要能编译并
+// 全绿，这样"核 + 单格式"的构建仍有真实覆盖。只有真正需要 JSON 做对照的断言包在
+// `CODEC_TEST_WITH_JSON` 里（CMake 在打开 JSON 时定义）。
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "codec_toml.hpp"
-#include "test_support.hpp"
 #include <gtest/gtest.h>
+
+#ifdef CODEC_TEST_WITH_JSON
+#include "codec_json.hpp"
+#endif
 
 namespace {
 
 using codec::DataResult;
 using codec::Dynamic;
-using codec::JsonOps;
-using codec::JsonValue;
 using codec::ListBuilder;
 using codec::MapLikePtr;
 using codec::Number;
@@ -28,6 +33,11 @@ using codec::Unit;
 using codec::Value;
 using codec::dumpToml;
 using codec::parseToml;
+
+#ifdef CODEC_TEST_WITH_JSON
+using codec::JsonOps;
+using codec::JsonValue;
+#endif
 
 // 解析一段 TOML 并交出根值（测试里重复很多次）。
 Value parseRoot(const std::string& text) {
@@ -67,11 +77,12 @@ TEST(TomlOpsTest, BooleanIsNotANumber) {
   const Value root = parseRoot("b = true\n");
   const Value flag = *(*TomlOps::INSTANCE.getMap(root).result())->get("b");
 
-  // TOML 的类型是严格的：布尔读不出数字 —— 这与 JsonOps 的怪癖不同
-  // （JsonOps 接受布尔并把 true 读成 1，DFU 的既有行为）。
+  // TOML 的类型是严格的：布尔读不出数字 —— 这与 JSON 的怪癖不同
+  // （JSON 侧接受布尔并把 true 读成 1，DFU 的既有行为）。
   EXPECT_TRUE(TomlOps::INSTANCE.getNumberValue(flag).isError());
   EXPECT_EQ(TomlOps::INSTANCE.getNumberValue(flag).message(), "Not a number: true");
 
+#ifdef CODEC_TEST_WITH_JSON
   // 对照：同一个 true 在 JSON 侧就是数字 1；转到 TOML 之后仍然是布尔，
   // 因此依然读不出数字（convertTo 保留类型，不做隐式提升）。
   EXPECT_EQ(JsonOps::INSTANCE.getNumberValue(Value(JsonValue::boolean(true))).result()->intValue(),
@@ -80,6 +91,7 @@ TEST(TomlOpsTest, BooleanIsNotANumber) {
       JsonOps::INSTANCE.convertTo(TomlOps::INSTANCE, Value(JsonValue::boolean(true)));
   EXPECT_TRUE(TomlOps::INSTANCE.valueEquals(converted, flag));
   EXPECT_TRUE(TomlOps::INSTANCE.getNumberValue(converted).isError());
+#endif
 }
 
 TEST(TomlOpsTest, TimeIsReadAsAStringNotANumber) {
@@ -112,11 +124,14 @@ TEST(TomlOpsTest, EqualityIsTypeStrict) {
   const Value one = TomlOps::INSTANCE.createInt(1);
   const Value oneDouble = TomlOps::INSTANCE.createDouble(1.0);
 
-  // tinytoml 的 operator== 是类型严格的：1 != 1.0（JsonOps 走 Gson 规则 1 == 1.0）。
+  // tinytoml 的 operator== 是类型严格的：1 != 1.0。
   EXPECT_FALSE(TomlOps::INSTANCE.valueEquals(one, oneDouble));
   EXPECT_TRUE(TomlOps::INSTANCE.valueEquals(one, TomlOps::INSTANCE.createInt(1)));
+#ifdef CODEC_TEST_WITH_JSON
+  // 对照：JSON 侧走 Gson 规则，数字按值比较，所以 1 == 1.0。
   EXPECT_TRUE(JsonOps::INSTANCE.valueEquals(Value(JsonValue::number(1)),
                                             Value(JsonValue::number(1.0))));
+#endif
 }
 
 TEST(TomlOpsTest, ConvertsNestedStructuresBothWays) {
@@ -125,21 +140,23 @@ TEST(TomlOpsTest, ConvertsNestedStructuresBothWays) {
       "  numbers = [1, 2, 3]\n"
       "  nested = { flag = true }\n");
 
-  // TOML → JSON：走 Tinytoml 节点，调 JsonOps 的 createX。
-  const Value asJson = TomlOps::INSTANCE.convertTo(JsonOps::INSTANCE, root);
-  EXPECT_EQ(asJson.asJson().dump(),
-            R"({"table":{"nested":{"flag":true},"numbers":[1,2,3]}})");
-
-  // JSON → TOML：走 JSON 节点，调 TomlOps 的 createX。
-  const Value backToToml = JsonOps::INSTANCE.convertTo(TomlOps::INSTANCE, asJson);
-  EXPECT_TRUE(TomlOps::INSTANCE.valueEquals(backToToml, root));
-
   // 同一个 ops 时是恒等（按值比较：两边都是同一份节点）。
   EXPECT_TRUE(TomlOps::INSTANCE.valueEquals(TomlOps::INSTANCE.convertTo(TomlOps::INSTANCE, root),
                                             root));
   // as<T>() 返回的是节点指针，两者指向同一份 tinytoml 节点。
   const Value identity = TomlOps::INSTANCE.convertTo(TomlOps::INSTANCE, root);
   EXPECT_EQ(identity.as<toml::Value>(), root.as<toml::Value>());
+
+#ifdef CODEC_TEST_WITH_JSON
+  // TOML → JSON：走 Tinytoml 节点，调 JsonOps 的 createX。
+  const Value asJson = TomlOps::INSTANCE.convertTo(JsonOps::INSTANCE, root);
+  EXPECT_EQ(jsonView(asJson).dump(),
+            R"({"table":{"nested":{"flag":true},"numbers":[1,2,3]}})");
+
+  // JSON → TOML：走 JSON 节点，调 TomlOps 的 createX。
+  const Value backToToml = JsonOps::INSTANCE.convertTo(TomlOps::INSTANCE, asJson);
+  EXPECT_TRUE(TomlOps::INSTANCE.valueEquals(backToToml, root));
+#endif
 }
 
 TEST(TomlOpsTest, DumpTomlRejectsANonTableRoot) {
@@ -322,6 +339,7 @@ TEST(TomlOpsTest, BuildersReportErrorsLikeJsonOps) {
   ASSERT_TRUE(badKeyResult.isError());
   EXPECT_EQ(badKeyResult.message(), "Not a string: 1");
 
+#ifdef CODEC_TEST_WITH_JSON
   // 混进来的 JSON 句柄：明确报错，而不是静默 UB。
   const std::shared_ptr<ListBuilder> foreign = TomlOps::INSTANCE.listBuilder();
   foreign->add(Value(JsonValue::number(1)));
@@ -334,12 +352,13 @@ TEST(TomlOpsTest, BuildersReportErrorsLikeJsonOps) {
   const DataResult<Value> foreignRecord = foreignMap->build(TomlOps::INSTANCE.empty());
   ASSERT_TRUE(foreignRecord.isError());
   EXPECT_NE(foreignRecord.message().find("non-TOML value"), std::string::npos);
+#endif
 }
 
 // 通用累加器（UniversalRecordBuilder）是"没有自带构造器的 ops"的回退路径。
-// 它不能假设键是 JSON 节点：这里用 TomlOps 直接驱动它，验证编码失败仍然带上
-// 键名作为位置——旧实现嗅探 key.as<JsonValue::Raw>()，对 TOML 键只会拿到
-// nullptr，于是错误位置被静默丢掉，这个用例会失败。
+// 它不能假设键是某种格式的节点：这里用 TomlOps 直接驱动它，验证编码失败仍然带上
+// 键名作为位置——旧实现嗅探具体格式的节点类型，对 TOML 键只会拿到 nullptr，
+// 于是错误位置被静默丢掉，这个用例会失败。
 TEST(TomlOpsTest, UniversalRecordBuilderAsksTheOpsForKeyNames) {
   codec::UniversalRecordBuilder builder(TomlOps::INSTANCE);
   builder.add(TomlOps::INSTANCE.createString("severity"),

@@ -9,6 +9,7 @@ add_executable(codec_perf_tests
 )
 
 codec_configure_test(codec_perf_tests)
+target_link_libraries(codec_perf_tests PRIVATE codec_json)
 
 gtest_discover_tests(codec_perf_tests
   TEST_PREFIX "perf."
