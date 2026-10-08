@@ -14,9 +14,9 @@ The reference implementation was decompiled from
 — not part of the build and deliberately not versioned — and the script exists so
 the port's provenance can be reproduced.
 
-* Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~4 100 lines, CMake `INTERFACE` target, nothing to build
+* Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~4 400 lines, CMake `INTERFACE` target, nothing to build
 * Comments inside the header are written in **Chinese**; API names, error messages, test names and both READMEs stay English
-* Layered tests: [`test/unit/`](test/unit) (142 cases), [`test/smoke/`](test/smoke) (23 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
+* Layered tests: [`test/unit/`](test/unit) (148 cases), [`test/smoke/`](test/smoke) (23 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -47,10 +47,14 @@ DataResult<JsonValue> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, valu
 
 | Dependency | Version | Where |
 | --- | --- | --- |
-| C++ | **C++17** (`/std:c++17`, `-std=c++17`) | required |
+| C++ | **C++17** (`/std:c++17`, `-std=c++17`) | required (C++20/23 unlock the optional diagnostics below) |
 | [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0 (single header) | `third_party/nlohmann/json.hpp` |
 | [GoogleTest](https://github.com/google/googletest) | 1.17.0 | `third_party/googletest-1.17.0` (tests only) |
 | CMake | ≥ 3.16, Ninja or MSBuild | build |
+
+The library itself is header-only, so there is nothing to configure — but because
+its comments are Chinese, an MSVC invocation outside this project's CMake target
+needs `/utf-8` (or `/source-charset:utf-8`); the `codec` target already adds it.
 
 ```powershell
 # 1. fetch nlohmann/json + GoogleTest (add -Proxy http://127.0.0.1:7890 if needed)
@@ -65,10 +69,20 @@ Or drive CMake directly:
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # all layers, 168 cases
+ctest --test-dir build --output-on-failure   # all layers, 174 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
+
+# optional: also capture a real std::stacktrace for every error (switches to C++23)
+cmake -S . -B cmake-build-stacktrace -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEC_RECORD_STACKTRACE=ON
 ```
+
+| CMake option | Default | Effect |
+| --- | --- | --- |
+| `CODEC_BUILD_TESTS` | `ON` | build the three test layers |
+| `CODEC_BUILD_EXAMPLES` | `ON` | build the example programs |
+| `CODEC_WARNINGS_AS_ERRORS` | `OFF` | `/WX`, `-Werror` |
+| `CODEC_RECORD_STACKTRACE` | `OFF` | define `CODEC_RECORD_STACKTRACE`, compile as C++23 and capture `std::stacktrace` per error |
 
 The three test layers are independent executables, so they can also be run
 directly:
@@ -312,6 +326,74 @@ risks[3].condition.or[0].op: Not a string: 1
   failures, missing keys, unbounded maps, dispatch payloads, the encode side
   (`FrameTest` for the chains, `ErrorPathTest` for the locations).
 
+**Clickable frames, portably.** Every frame also carries the place its codec was
+built, so `report()` doubles as a stack trace you can click through in an IDE:
+
+```text
+risks[3].condition.or[0].op: Not a string: 1
+  0> D:\programming\cpp\Codec\include\codec.hpp(3445): String
+  1> D:\programming\cpp\Codec\models\risk_def.hpp(116): optional[op]
+  2> D:\programming\cpp\Codec\models\risk_def.hpp(109): RecordCodec[or, and, not, param, op, value, list_match]
+  ...
+```
+
+* The location is a three-tier `SourceLocation`: `std::source_location` when the
+  standard library has it (C++20), otherwise `__builtin_FILE()`/`__builtin_LINE()`
+  (MSVC, GCC, Clang — all available in C++17), otherwise no location at all. The
+  code always compiles; only the diagnostics degrade.
+* It is a compile-time literal: nothing is allocated, and no debug information
+  (PDB/DWARF) is needed, so it works in Release builds too.
+* `report(FrameStyle::native | msvc | gnu)` picks the rendering — MSVC's
+  `file(line):` shape (the same one its own `<stacktrace>` uses) or the gdb-style
+  `#0 name at file:line`. Both are what CLion links, and `native` follows the
+  compiler. A frame built in your model points at your `record<...>`/`fieldOf(...)`
+  line; library frames point into `codec.hpp`.
+
+**Throwing instead of returning.** Where you would rather abort than inspect a
+`DataResult`:
+
+```cpp
+try {
+  RiskDocument document = riskDocumentCodec().parse(JsonOps::INSTANCE, input).throwIfError();
+} catch (const codec::CodecError& error) {
+  error.what();       // "risks[3].condition.or[0].op: Not a string: 1"  (one line)
+  error.report();     // ... plus the located codec chain
+  error.location();   // "risks[3].condition.or[0].op"
+  error.errors();     // the individual failures (path + frames + message)
+  error.hasPartial(); // whether a usable partial value existed
+}
+```
+
+* `CodecError` derives from `std::runtime_error`, so existing
+  `catch (const std::exception&)` blocks keep working; DFU's
+  `getOrThrow(allowPartial, onError)` throws it too.
+* Needs no compiler builtins, no C++20/23 and no debug info — the most portable
+  way to carry the diagnostic, and a breakpoint on `CodecError` shows the real
+  stack in any debugger.
+
+**A real stack trace, when the standard library has one.** Build with
+`-DCODEC_RECORD_STACKTRACE=ON` (which switches the build to C++23) to capture
+`std::stacktrace` where the failure is created and append it to `report()`:
+
+```text
+[1]: Not a number: "x"
+  0> D:\programming\cpp\Codec\include\codec.hpp(3445): Int
+  1> D:\programming\cpp\Codec\build\zh\print_stacktrace.cpp(16): list
+  stacktrace:
+    0> D:\programming\cpp\Codec\include\codec.hpp(1074): demo!codec::DataResult<codec::Number>::makeErrorPart+0x66
+    ...
+    21> D:\programming\cpp\Codec\build\zh\print_stacktrace.cpp(17): demo!main+0x111
+```
+
+* It is rendered by the standard library itself, so it already has the shape your
+  toolchain's IDE parses; with debug info (`/Zi`, i.e. Debug builds) every frame
+  carries `file(line)` (MSVC) or `file:line` (libstdc++/libc++) — including the
+  line that called `parse()`, which the codec chain cannot know.
+* Off by default: capturing costs on *every* error, including the
+  present-but-invalid optional values DFU deliberately swallows. Without C++23 the
+  header is still a plain C++17 header and this layer simply does not exist
+  (`test/unit/stacktrace_test.cpp` skips itself).
+
 **Strict optional fields.** Paths only help if the error is not swallowed, and DFU's
 `OptionalFieldCodec` deliberately swallows a present-but-invalid optional value. For
 validation you want the error, so the port adds error-propagating counterparts:
@@ -370,20 +452,21 @@ Measured results (see `test/smoke/risk_def_test.cpp` and the example):
   input (the record field order mirrors the document);
 * decode → encode → decode is stable, and a hand-built document round-trips;
 * a malformed rule is reported with its exact location and the chain of codecs that
-  handled it — `risk_def_example.exe bad.json` prints
+  handled it, each frame carrying the line that built it — `risk_def_example.exe
+  bad.json` prints (CLion links every `file(line)`)
 
   ```text
   risks[0].condition.or[0].op: Not a string: 1
-    in String
-    in optional[op]
-    in RecordCodec[or, and, not, param, op, value, list_match]
-    in list
-    in optional[or]
-    in RecordCodec[or, and, not, param, op, value, list_match]
-    in optional[condition]
-    in RecordCodec[id, vid, risk_type, severity, name, description, solution, condition, evidence]
-    in list
-    in RecordCodec[risks]
+    0> D:\programming\cpp\Codec\include\codec.hpp(3477): String
+    1> D:\programming\cpp\Codec\models\risk_def.hpp(116): optional[op]
+    2> D:\programming\cpp\Codec\models\risk_def.hpp(109): RecordCodec[or, and, not, param, op, value, list_match]
+    3> D:\programming\cpp\Codec\models\risk_def.hpp(109): list
+    4> D:\programming\cpp\Codec\include\codec.hpp(3326): optional[or]
+    5> D:\programming\cpp\Codec\models\risk_def.hpp(109): RecordCodec[or, and, not, param, op, value, list_match]
+    6> D:\programming\cpp\Codec\models\risk_def.hpp(134): optional[condition]
+    7> D:\programming\cpp\Codec\models\risk_def.hpp(127): RecordCodec[id, vid, risk_type, severity, name, description, solution, condition, evidence]
+    8> D:\programming\cpp\Codec\models\risk_def.hpp(141): list
+    9> D:\programming\cpp\Codec\models\risk_def.hpp(141): RecordCodec[risks]
   ```
 
   The condition tree is recursive, so the same `RecordCodec` appears at both levels.
@@ -430,16 +513,19 @@ Intentional deviations and additions, all documented in the headers:
 | `Codec.optionalFieldOf(name, Lifecycle, …)` | 4-argument overload | not ported | rarely used; `.stable()` covers it |
 | `codec::recursive<A>(supplier)` *(addition)* | — (Java expresses recursion through the datafixer graphs) | provided | resolves the supplier on first use, which also breaks the static-initialisation cycle |
 | `codecs::stringEnum<E>(table, name)` *(addition)* | — (Minecraft uses `StringRepresentable.fromEnum`, which is not in DFU) | provided | name-table enums without boilerplate; implemented with `flatXmap`, so it composes like any other codec |
-| `DataResult::location()` / `describe()` / `report()` *(addition)* | no locations anywhere | every field/element/map entry attaches its path, every codec its own name | messages stay DFU-identical; `describe()` reports `risks[3].condition.or[0].op: Not a string: 1`, `report()` adds the codec chain |
+| `DataResult::location()` / `describe()` / `report()` *(addition)* | no locations anywhere | every field/element/map entry attaches its path, every codec its own name and construction site | messages stay DFU-identical; `describe()` reports `risks[3].condition.or[0].op: Not a string: 1`, `report()` adds the codec chain with clickable `file(line)` frames |
+| `SourceLocation` + `report(FrameStyle)` *(addition)* | — | `std::source_location` / `__builtin_FILE/LINE` / nothing, in that order | cross-platform clickable frames without debug info; degrades instead of failing |
+| `DataResult::throwIfError()` / `codec::CodecError` *(addition)* | `getOrThrow` throws `RuntimeException` | `std::runtime_error` subclass carrying location, frames, parts and partial flag | portable "throw, don't return", catchable as `std::exception` |
+| `CODEC_RECORD_STACKTRACE` *(addition)* | no stack traces | `std::stacktrace` captured at the failure, rendered by the STL | C++23 only, opt-in; Debug info turns it into clickable `file(line)` |
 | `optionalFieldStrict` / `optionalFieldOfStrict` *(addition)* | `OptionalFieldCodec` swallows a present-but-invalid value | error-propagating counterpart | a validator must not read a broken value as an absent one |
 
 ## 6. Test layers
 
-168 GoogleTest cases in three independent executables. `ctest` prefixes each case
+174 GoogleTest cases in three independent executables. `ctest` prefixes each case
 with its layer (`unit.*`, `smoke.*`, `perf.*`), so any layer can be selected as a
 group.
 
-**`test/unit/` → `codec_unit_tests` (142 cases)** — component level, exhaustive
+**`test/unit/` → `codec_unit_tests` (148 cases)** — component level, exhaustive
 on edge cases:
 
 | File | Focus |
@@ -453,7 +539,8 @@ on edge cases:
 | `record_codec_test.cpp` | `record<>` in all forms, `fieldOf`/`optionalFieldOf`/`forGetter`, error joining, partial objects, keys, compression |
 | `dispatch_test.cpp` | `KeyDispatchCodec` (`partialDispatch`/`dispatch`/`dispatchMap`), map-codec payload merging, compressed dispatch |
 | `string_and_enum_test.cpp` | the scalar-conversion cookbook: number↔enum, string↔enum (incl. `codecs::stringEnum`), string↔number, number-or-string via `either`, enums in records/lists/optional fields |
-| `error_path_test.cpp` | error locations: the requested `risks[3].condition.or[0].op` form, message wording rewrites, nested lists, multi-part failures, missing keys, unbounded maps, dispatch payloads, the encode side, strict vs lenient optionals; `FrameTest` pins the `report()` codec chains (records, lists, optionals, dispatch, plus one block per failed part) |
+| `error_path_test.cpp` | error locations: the requested `risks[3].condition.or[0].op` form, message wording rewrites, nested lists, multi-part failures, missing keys, unbounded maps, dispatch payloads, the encode side, strict vs lenient optionals; `FrameTest` pins the `report()` codec chains, their `file(line)` construction sites and both rendering styles; `CodecErrorTest` covers `throwIfError()` / `getOrThrow()` |
+| `stacktrace_test.cpp` | the optional `std::stacktrace` layer: feature-detection consistency, capture and STL-rendered output; skips itself when `CODEC_RECORD_STACKTRACE` is off |
 | `odr_test.cpp` + `odr_probe.cpp` | header-only guarantee: two TUs including the single header link together, and the inline singletons have one shared address |
 | `header_self_contained_test.cpp` | includes `codec.hpp` before every other header, proving the single header stands alone |
 

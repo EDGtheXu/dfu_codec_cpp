@@ -197,19 +197,35 @@ TEST(RiskDefTest, ErrorLocationPointsIntoTheDocument) {
   // ... and the chain of codecs that handled the value.  The condition tree is
   // recursive, so the same RecordCodec appears at both levels: the "or" element is
   // itself a condition, whose "or" field is the list that holds the bad leaf.
-  EXPECT_EQ(result.report(),
-            "risks[3].condition.or[0].op: Not a string: 1\n"
-            "  in String\n"
-            "  in optional[op]\n"
-            "  in RecordCodec[or, and, not, param, op, value, list_match]\n"
-            "  in list\n"
-            "  in optional[or]\n"
-            "  in RecordCodec[or, and, not, param, op, value, list_match]\n"
-            "  in optional[condition]\n"
-            "  in RecordCodec[id, vid, risk_type, severity, name, description, solution, "
-            "condition, evidence]\n"
-            "  in list\n"
-            "  in RecordCodec[risks]");
+  const std::vector<std::string> expected{"String",
+                                          "optional[op]",
+                                          "RecordCodec[or, and, not, param, op, value, list_match]",
+                                          "list",
+                                          "optional[or]",
+                                          "RecordCodec[or, and, not, param, op, value, list_match]",
+                                          "optional[condition]",
+                                          "RecordCodec[id, vid, risk_type, severity, name, "
+                                          "description, solution, condition, evidence]",
+                                          "list",
+                                          "RecordCodec[risks]"};
+  EXPECT_EQ(result.frameNames(), expected);
+
+  // report() renders the same chain with each codec's construction site, so an IDE
+  // can jump from the diagnostic to the line that built that codec.  The first
+  // line is still the located message; every frame carries a location (the leaves
+  // point into include/codec.hpp, the model frames into models/risk_def.hpp).
+  const std::string report = result.report();
+  const std::string firstLine = "risks[3].condition.or[0].op: Not a string: 1\n";
+  EXPECT_EQ(report.compare(0, firstLine.size(), firstLine), 0) << report;
+  EXPECT_NE(report.find("risk_def.hpp"), std::string::npos) << report;
+  for (const codec::ErrorPart& part : result.errors()) {
+    for (const codec::Frame& frame : part.frames) {
+#if defined(CODEC_HAS_SOURCE_LOCATION) || defined(CODEC_HAS_BUILTIN_FILE)
+      EXPECT_TRUE(frame.where.valid()) << frame.codec;
+      EXPECT_GT(frame.where.line, 0u) << frame.codec;
+#endif
+    }
+  }
 }
 
 TEST(RiskDefTest, LenientOptionalFieldsStillSwallowTheError) {

@@ -17,6 +17,8 @@ endif()
 option(CODEC_BUILD_TESTS "Build the GoogleTest unit test suite" ON)
 option(CODEC_BUILD_EXAMPLES "Build the example programs" ON)
 option(CODEC_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+option(CODEC_RECORD_STACKTRACE
+  "Capture a std::stacktrace for every error (needs C++23; file:line needs debug info)" OFF)
 
 # ---------------------------------------------------------------------------
 # Header-only interface library
@@ -29,6 +31,20 @@ target_include_directories(codec INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
 )
 target_compile_features(codec INTERFACE cxx_std_17)
+
+# Optional: record a real C++ stack trace with the standard library's
+# <stacktrace> (C++23).  Off by default because capturing costs on every error;
+# the header still compiles as C++17 when it is off (see include/codec.hpp).
+if(CODEC_RECORD_STACKTRACE)
+  target_compile_definitions(codec INTERFACE CODEC_RECORD_STACKTRACE)
+  if(MSVC)
+    # /std:c++latest for <stacktrace>; /bigobj because the C++23 instantiation
+    # count of this header exceeds the default section limit.
+    target_compile_options(codec INTERFACE /std:c++latest /bigobj)
+  else()
+    target_compile_options(codec INTERFACE -std=c++23)
+  endif()
+endif()
 
 if(MSVC)
   target_compile_options(codec INTERFACE /utf-8 /W4 /permissive- /Zc:__cplusplus)

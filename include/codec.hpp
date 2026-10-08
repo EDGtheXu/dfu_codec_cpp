@@ -74,6 +74,46 @@
 #include <variant>
 #include <vector>
 
+// --- 可选的诊断设施（按可用性启用，缺失时自动降级） ------------------------------
+//
+// 两者都是标准库的一部分，不是平台 API：
+//   * <source_location>：C++20 起提供 std::source_location；
+//   * <stacktrace>：C++23 起提供 std::stacktrace。
+// 早于它们的标准里，源码位置退回到 MSVC/GCC/Clang 都支持的
+// __builtin_FILE()/__builtin_LINE()；再没有就退化为「无位置信息」。
+// 也就是说：任何编译器都能构建，位置信息则按能力逐级降级。
+#if defined(__has_include)
+#if __has_include(<version>)
+#include <version>  // 提供 __cpp_lib_* 特性宏
+#endif
+
+#if __has_include(<source_location>) && defined(__cpp_lib_source_location)
+#include <source_location>
+#define CODEC_HAS_SOURCE_LOCATION 1
+#endif
+
+#if __has_include(<stacktrace>) && defined(__cpp_lib_stacktrace)
+#include <stacktrace>
+#define CODEC_HAS_STACKTRACE 1
+#endif
+#endif  // __has_include
+
+// 捕获 codec 构造位置的三种途径，按可用性从优到劣；都不满足时
+// SourceLocation::current() 返回「无位置」，构建与行为不受影响。
+#if !defined(CODEC_HAS_SOURCE_LOCATION) && \
+    (defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__))
+#define CODEC_HAS_BUILTIN_FILE 1
+#endif
+
+// 想让 report() 附带真正的 C++ 调用栈（而不是 codec 调用链），
+// 在编译时定义 CODEC_RECORD_STACKTRACE，并且要用 C++23 或更新标准
+// （需要 <stacktrace>）。代价：每次产生错误都会抓一次栈，
+// 因此对「存在但非法的可选字段」这种会被吞掉的错误也会付费，
+// 所以默认关闭。
+#if defined(CODEC_HAS_STACKTRACE) && defined(CODEC_RECORD_STACKTRACE)
+#define CODEC_CAPTURES_STACKTRACE 1
+#endif
+
 // --- 第三方 --------------------------------------------------------------------
 #include <nlohmann/json.hpp>
 
@@ -713,14 +753,85 @@ struct PathSegment {
   bool operator!=(const PathSegment& other) const { return !(*this == other); }
 };
 
+// 源码位置：编译器在调用点生成的编译期字面量。它不分配内存、不依赖
+// 调试信息（PDB/DWARF），因此在 Release 构建里同样可用——这正是它比
+// 栈回溯更适合给 codec 调用链做标注的原因。
+//
+// 三级来源，按可用性自动选择：标准库 std::source_location（C++20）→
+// MSVC/GCC/Clang 通用的 __builtin_FILE()/__builtin_LINE() → 无位置。
+struct SourceLocation {
+  const char* file = nullptr;
+  std::uint_least32_t line = 0;
+
+  constexpr bool valid() const noexcept { return file != nullptr; }
+  constexpr explicit operator bool() const noexcept { return valid(); }
+
+#if defined(CODEC_HAS_SOURCE_LOCATION)
+  // 默认实参在*调用点*求值，因此这里拿到的正是构造该 codec 的那一行。
+  static SourceLocation current(
+      const std::source_location& location = std::source_location::current()) {
+    return SourceLocation{location.file_name(),
+                          static_cast<std::uint_least32_t>(location.line())};
+  }
+#elif defined(CODEC_HAS_BUILTIN_FILE)
+  static constexpr SourceLocation current(const char* file = __builtin_FILE(),
+                                          std::uint_least32_t line = __builtin_LINE()) {
+    return SourceLocation{file, line};
+  }
+#else
+  static constexpr SourceLocation current() { return SourceLocation{}; }
+#endif
+
+  // 两种可点击写法：GCC/Clang 诊断风格 `file:line`，MSVC 诊断风格
+  // `file(line)`（后者也正是 MSVC 自家 <stacktrace> 的输出格式）。
+  std::string renderGnu() const {
+    return valid() ? std::string(file) + ":" + std::to_string(line) : std::string();
+  }
+  std::string renderMsvc() const {
+    return valid() ? std::string(file) + "(" + std::to_string(line) + ")" : std::string();
+  }
+};
+
+// report() 里栈帧的排版风格。native 表示按当前编译器选：MSVC 工具链用
+// msvc（与它自家的诊断、<stacktrace> 输出一致），其余用 gnu（gdb/lldb
+// 风格）。两种写法都带「文件:行号」，CLion 等 IDE 都能点开。
+enum class FrameStyle { native, msvc, gnu };
+
+#if defined(_MSC_VER)
+inline constexpr FrameStyle kNativeFrameStyle = FrameStyle::msvc;
+#else
+inline constexpr FrameStyle kNativeFrameStyle = FrameStyle::gnu;
+#endif
+
+// codec 调用链上的一帧：codec 自己的短名，加上构造它的位置
+// （位置未知时只打印名字）。
+struct Frame {
+  std::string codec;
+  SourceLocation where;
+
+  bool operator==(const Frame& other) const {
+    if (codec != other.codec || where.line != other.where.line) {
+      return false;
+    }
+    return std::string_view(where.file ? where.file : "") ==
+           std::string_view(other.where.file ? other.where.file : "");
+  }
+  bool operator!=(const Frame& other) const { return !(*this == other); }
+};
+
 // 一次失败：它在何处被发现、DFU 为它给出的消息，以及处理过它的 codec
 // 调用链（叶子优先，类似栈回溯）。在多个位置失败的结果
 // 会持有多个部分，`message()` 正是用「; 」把它们连接起来，
 // 与 DFU 完全一致。
 struct ErrorPart {
-  std::vector<PathSegment> path;   // 叶子优先
-  std::vector<std::string> frames;  // 叶子优先：失败的 codec，然后是它的调用方
+  std::vector<PathSegment> path;  // 叶子优先
+  std::vector<Frame> frames;      // 叶子优先：失败的 codec，然后是它的调用方
   std::string message;
+#if defined(CODEC_CAPTURES_STACKTRACE)
+  // 真正的 C++ 调用栈（标准库 <stacktrace>），只在定义了
+  // CODEC_RECORD_STACKTRACE 时记录。
+  std::stacktrace trace;
+#endif
 };
 
 inline std::string renderPath(const std::vector<PathSegment>& path) {
@@ -797,15 +908,28 @@ class DataResultBase {
     return out;
   }
 
-  // 完整的多行诊断：每一次失败及其位置，以及产生它的 codec
-  // 调用链。
+  // 完整的多行诊断：每一次失败及其位置、产生它的 codec 调用链，
+  // 以及（启用 CODEC_RECORD_STACKTRACE 时）标准库抓取的 C++ 调用栈。
   //
-  //   risks[3].condition.or[0].op: Not a string: 1
-  //     in String
-  //     in optional[op]
-  //     in RecordCodec[or, and, not, param, op, value, list_match]
-  //     ...
-  std::string report() const {
+  // 栈帧按「IDE 能识别成可点击链接」的形式渲染，默认跟随编译器：
+  //
+  //   msvc（MSVC 工具链，与它自家的诊断、<stacktrace> 输出同形）
+  //     risks[3].condition.or[0].op: Not a string: 1
+  //       0> D:\...\codec.hpp(3295): String
+  //       1> D:\...\risk_def.hpp(88): optional[op]
+  //
+  //   gnu（gdb/lldb 风格）
+  //     risks[3].condition.or[0].op: Not a string: 1
+  //       #0 String at D:\...\codec.hpp:3295
+  //       #1 optional[op] at D:\...\risk_def.hpp:88
+  //
+  // 两种写法都含「文件:行号」，因此 CLion 的「Analyze Stack Trace」
+  // 与控制台超链接都能直接跳到构造该 codec 的那一行；
+  // 位置未知时只打印 codec 名字。
+  std::string report(FrameStyle style = FrameStyle::native) const {
+    if (style == FrameStyle::native) {
+      style = kNativeFrameStyle;
+    }
     std::string out;
     for (size_t i = 0; i < errors_.size(); ++i) {
       const ErrorPart& part = errors_[i];
@@ -818,12 +942,61 @@ class DataResultBase {
         out += ": ";
       }
       out += part.message;
-      for (const std::string& frame : part.frames) {
-        out += "\n  in ";
-        out += frame;
+
+      int index = 0;
+      for (const Frame& frame : part.frames) {
+        const std::string number = std::to_string(index);
+        if (style == FrameStyle::msvc) {
+          const std::string where = frame.where.renderMsvc();
+          out += "\n  " + number + "> ";
+          if (!where.empty()) {
+            out += where;
+            out += ": ";
+          }
+          out += frame.codec;
+        } else {
+          out += "\n  #" + number + " " + frame.codec;
+          const std::string where = frame.where.renderGnu();
+          if (!where.empty()) {
+            out += " at ";
+            out += where;
+          }
+        }
+        ++index;
       }
+
+#if defined(CODEC_CAPTURES_STACKTRACE)
+      // 标准库 <stacktrace> 自己的排版：MSVC 是 `0> file(line): module!func`，
+      // libstdc++/libc++ 是 `   0# func at file:line`。原样缩进贴出来，
+      // 让 IDE 用它们熟悉的格式解析。
+      if (part.trace.size() != 0) {
+        out += "\n  stacktrace:";
+        const std::string trace = std::to_string(part.trace);
+        size_t start = 0;
+        while (start < trace.size()) {
+          const size_t end = trace.find('\n', start);
+          out += "\n    ";
+          out += trace.substr(start, end == std::string::npos ? std::string::npos : end - start);
+          if (end == std::string::npos) {
+            break;
+          }
+          start = end + 1;
+        }
+      }
+#endif
     }
     return out;
+  }
+
+  // 只要 codec 名字的调用链（不含位置与消息），便于程序化比较。
+  std::vector<std::string> frameNames() const {
+    std::vector<std::string> names;
+    for (const ErrorPart& part : errors_) {
+      for (const Frame& frame : part.frames) {
+        names.push_back(frame.codec);
+      }
+    }
+    return names;
   }
 
   const std::vector<ErrorPart>& errors() const { return errors_; }
@@ -835,6 +1008,43 @@ class DataResultBase {
   // 不在前面加任何东西：容器用 DataResult::addPath 追加自己的段。
   std::vector<ErrorPart> errors_;
   Lifecycle lifecycle_;
+};
+
+// 把失败变成异常——错误传播的最跨平台方式：只用标准库
+// （<stdexcept>），任何编译器、任何标准版本都一样；而且不需要
+// 源码位置或调试信息就能工作。
+//
+// 在 CLion 等 IDE 里对 CodecError 下断点，即可在抛出点停下并看到
+// 真正的调用栈；异常对象本身携带位置与 codec 调用链，所以即使不调试
+// 也能知道是哪个字段、哪个 codec 出的错。
+//
+// 它派生自 std::runtime_error，因此既有的
+// catch (const std::exception&) / catch (const std::runtime_error&)
+// 继续有效。what() 是单行的「位置: 消息」，report() 给出带 codec
+// 调用链的完整诊断。
+class CodecError : public std::runtime_error {
+ public:
+  explicit CodecError(const DataResultBase& result)
+      : std::runtime_error(result.describe()),
+        report_(result.report()),
+        location_(result.location()),
+        errors_(result.errors()),
+        hasPartial_(result.hasValue()) {}
+
+  // 带位置与 codec 调用链的多行诊断（与 DataResult::report() 相同）。
+  const std::string& report() const noexcept { return report_; }
+  // 失败位置；多处失败且位置不一致时为空。
+  const std::string& location() const noexcept { return location_; }
+  // 每个失败部分：路径 + codec 帧 + 消息。
+  const std::vector<ErrorPart>& errors() const noexcept { return errors_; }
+  // 异常里是否还带着可用的部分值（DFU 的 partial result）。
+  bool hasPartial() const noexcept { return hasPartial_; }
+
+ private:
+  std::string report_;
+  std::string location_;
+  std::vector<ErrorPart> errors_;
+  bool hasPartial_ = false;
 };
 
 template <class R>
@@ -852,6 +1062,20 @@ class DataResult : public DataResultBase {
     return result;
   }
 
+  // 构造一个失败部分；启用 CODEC_RECORD_STACKTRACE（且标准库提供
+  // <stacktrace>）时同时抓取当前的 C++ 调用栈。捕获点就在错误产生的
+  // 地方，因此栈里既有 codec 内部的调用帧，也有用户调用 parse() 的
+  // 那一行——这是唯一能拿到「用户那一帧」的时机。
+  static ErrorPart makeErrorPart(std::string message) {
+    ErrorPart part;
+    part.message = std::move(message);
+#if defined(CODEC_CAPTURES_STACKTRACE)
+    // 限制深度：错误路径上不值得抓满整条栈。
+    part.trace = std::stacktrace::current(0, 32);
+#endif
+    return part;
+  }
+
   static DataResult error(std::string message) {
     return errorNoPartial(std::move(message), Lifecycle::experimental());
   }
@@ -860,7 +1084,7 @@ class DataResult : public DataResultBase {
                           Lifecycle lifecycle = Lifecycle::experimental()) {
     DataResult result;
     result.value_ = std::move(partial);
-    result.errors_.push_back(ErrorPart{{}, {}, std::move(message)});
+    result.errors_.push_back(makeErrorPart(std::move(message)));
     result.lifecycle_ = lifecycle;
     return result;
   }
@@ -868,7 +1092,7 @@ class DataResult : public DataResultBase {
   static DataResult errorNoPartial(std::string message,
                                    Lifecycle lifecycle = Lifecycle::experimental()) {
     DataResult result;
-    result.errors_.push_back(ErrorPart{{}, {}, std::move(message)});
+    result.errors_.push_back(makeErrorPart(std::move(message)));
     result.lifecycle_ = lifecycle;
     return result;
   }
@@ -877,7 +1101,7 @@ class DataResult : public DataResultBase {
                                  Lifecycle lifecycle = Lifecycle::experimental()) {
     DataResult result;
     result.value_ = std::move(partial);
-    result.errors_.push_back(ErrorPart{{}, {}, std::move(message)});
+    result.errors_.push_back(makeErrorPart(std::move(message)));
     result.lifecycle_ = lifecycle;
     return result;
   }
@@ -943,21 +1167,24 @@ class DataResult : public DataResultBase {
   // 给每个部分附加一个 codec 帧。每个 codec 工厂都在自己的失败路径上
   // 调用它，因此各部分最终携带处理过该值的 codec 调用链
   // -- 解码的「栈」，最内层在前。与 addPath 一样，
-  // 只有在出现错误时才会真正构造帧字符串。
-  DataResult addFrame(std::string_view frame) const& {
+  // 只有在出现错误时才会真正构造帧对象。
+  //
+  // `where` 是构造该 codec 的位置（工厂函数的默认实参在调用点取值），
+  // 于是 report() 里每一帧都能点回源码；跨平台由 SourceLocation 负责。
+  DataResult addFrame(std::string_view frame, SourceLocation where = {}) const& {
     if (isSuccess()) {
       return *this;
     }
     DataResult out = *this;
     for (ErrorPart& part : out.errors_) {
-      part.frames.emplace_back(frame);
+      part.frames.push_back(Frame{std::string(frame), where});
     }
     return out;
   }
-  DataResult addFrame(std::string_view frame) && {
+  DataResult addFrame(std::string_view frame, SourceLocation where = {}) && {
     if (isError()) {
       for (ErrorPart& part : errors_) {
-        part.frames.emplace_back(frame);
+        part.frames.push_back(Frame{std::string(frame), where});
       }
     }
     return std::move(*this);
@@ -984,7 +1211,18 @@ class DataResult : public DataResultBase {
       if (allowPartial && value_) {
         return *value_;
       }
-      throw std::runtime_error(text);
+      // DFU 抛 RuntimeException；这里抛 CodecError（同样是
+      // std::runtime_error 的派生类，但额外带了位置与 codec 调用链）。
+      throw CodecError(*this);
+    }
+    return *value_;
+  }
+
+  // 失败即抛 CodecError（新增）：不关心部分值时的最简入口，
+  // 也是「让调试器显示栈」的跨平台做法。
+  R throwIfError() const {
+    if (isError()) {
+      throw CodecError(*this);
     }
     return *value_;
   }
@@ -1087,9 +1325,16 @@ class DataResult : public DataResultBase {
       // 每个部分都共享它们时会保留下来，否则会被丢弃
       // （否则会造成误导）。
       const std::vector<PathSegment> path = sharedPath();
-      const std::vector<std::string> frames = sharedFrames();
+      const std::vector<Frame> frames = sharedFrames();
+      ErrorPart part{path, frames, function(message())};
+#if defined(CODEC_CAPTURES_STACKTRACE)
+      // 消息被重写了，但栈仍然是产生这次失败的那个栈。
+      if (!out.errors_.empty()) {
+        part.trace = out.errors_.front().trace;
+      }
+#endif
       out.errors_.clear();
-      out.errors_.push_back(ErrorPart{path, frames, function(message())});
+      out.errors_.push_back(std::move(part));
     }
     return out;
   }
@@ -1138,7 +1383,7 @@ class DataResult : public DataResultBase {
   }
 
   // 每个部分共享的 codec 帧，它们不同时为空。
-  std::vector<std::string> sharedFrames() const {
+  std::vector<Frame> sharedFrames() const {
     if (errors_.empty() || errors_.front().frames.empty()) {
       return {};
     }
@@ -2880,23 +3125,29 @@ class Codec {
   }
 
   // --- dispatch（定义于 codecs.hpp） --------------------------------------
+  // `where` 同样是默认实参：dispatch 帧由此点回用户构造它的那一行。
   template <class E, class TypeFn, class CodecFn>
-  Codec<E> partialDispatch(const std::string& typeKey, TypeFn type, CodecFn codec) const;
+  Codec<E> partialDispatch(const std::string& typeKey, TypeFn type, CodecFn codec,
+                           SourceLocation where = SourceLocation::current()) const;
 
   template <class E, class TypeFn, class CodecFn>
-  Codec<E> dispatch(const std::string& typeKey, TypeFn type, CodecFn codec) const;
+  Codec<E> dispatch(const std::string& typeKey, TypeFn type, CodecFn codec,
+                    SourceLocation where = SourceLocation::current()) const;
 
   template <class E, class TypeFn, class CodecFn>
-  Codec<E> dispatch(TypeFn type, CodecFn codec) const {
-    return dispatch<E>(std::string("type"), std::move(type), std::move(codec));
+  Codec<E> dispatch(TypeFn type, CodecFn codec,
+                    SourceLocation where = SourceLocation::current()) const {
+    return dispatch<E>(std::string("type"), std::move(type), std::move(codec), where);
   }
 
   template <class E, class TypeFn, class CodecFn>
-  MapCodec<E> dispatchMap(const std::string& typeKey, TypeFn type, CodecFn codec) const;
+  MapCodec<E> dispatchMap(const std::string& typeKey, TypeFn type, CodecFn codec,
+                          SourceLocation where = SourceLocation::current()) const;
 
   template <class E, class TypeFn, class CodecFn>
-  MapCodec<E> dispatchMap(TypeFn type, CodecFn codec) const {
-    return dispatchMap<E>(std::string("type"), std::move(type), std::move(codec));
+  MapCodec<E> dispatchMap(TypeFn type, CodecFn codec,
+                          SourceLocation where = SourceLocation::current()) const {
+    return dispatchMap<E>(std::string("type"), std::move(type), std::move(codec), where);
   }
 
   // Codec.unit -- 一个不编码任何内容、解码为 `value` 的 codec。
@@ -3015,7 +3266,8 @@ MapCodec<std::optional<A>> optionalField(const std::string& name, Codec<A> eleme
 // 以及任何否则会把「字段被丢弃」解码成「字段没问题」的
 // 场合。
 template <class A>
-MapCodec<std::optional<A>> optionalFieldStrict(const std::string& name, Codec<A> elementCodec) {
+MapCodec<std::optional<A>> optionalFieldStrict(const std::string& name, Codec<A> elementCodec,
+                                              SourceLocation where = SourceLocation::current()) {
   return MapCodec<std::optional<A>>::of(
       MapEncoder<std::optional<A>>(
           [name, elementCodec](const std::optional<A>& input, const DynamicOps& ops,
@@ -3027,8 +3279,8 @@ MapCodec<std::optional<A>> optionalFieldStrict(const std::string& name, Codec<A>
           },
           [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; }),
       MapDecoder<std::optional<A>>(
-          [name, elementCodec](const DynamicOps& ops,
-                              const MapLike& input) -> DataResult<std::optional<A>> {
+          [name, elementCodec, where](const DynamicOps& ops,
+                                      const MapLike& input) -> DataResult<std::optional<A>> {
             const std::optional<JsonValue> value = input.get(name);
             if (!value.has_value()) {
               return DataResult<std::optional<A>>::success(std::optional<A>{});
@@ -3037,7 +3289,7 @@ MapCodec<std::optional<A>> optionalFieldStrict(const std::string& name, Codec<A>
                 elementCodec.parse(ops, *value)
                     .map([](const A& value) { return std::optional<A>(value); });
             if (parsed.isError()) {
-              parsed = parsed.addPath(name).addFrame("optional[" + name + "]");
+              parsed = parsed.addPath(name).addFrame("optional[" + name + "]", where);
             }
             return parsed;
           },
@@ -3147,15 +3399,19 @@ class Either {
 // ---------------------------------------------------------------------------
 namespace detail {
 
+// `where` 由默认实参在调用点取得：每个 codec() 单例的定义行，
+// 于是 report() 里的 `Int` 帧能点回下面这行定义。
 template <class A, class ReadFn, class WriteFn>
-Codec<A> primitiveCodec(std::string name, ReadFn read, WriteFn write) {
-  Encoder<A> encoder([write, name](const A& input, const DynamicOps& ops, const JsonValue& prefix) {
-    return ops.mergeToPrimitive(prefix, write(ops, input)).addFrame(name);
+Codec<A> primitiveCodec(std::string name, ReadFn read, WriteFn write,
+                        SourceLocation where = SourceLocation::current()) {
+  Encoder<A> encoder([write, name, where](const A& input, const DynamicOps& ops,
+                                          const JsonValue& prefix) {
+    return ops.mergeToPrimitive(prefix, write(ops, input)).addFrame(name, where);
   });
-  Decoder<A> decoder([read, name](const DynamicOps& ops, const JsonValue& input) {
+  Decoder<A> decoder([read, name, where](const DynamicOps& ops, const JsonValue& input) {
     return read(ops, input)
         .map([&](const A& value) { return std::make_pair(value, ops.empty()); })
-        .addFrame(name);
+        .addFrame(name, where);
   });
   return Codec<A>::of(std::move(encoder), std::move(decoder), std::move(name));
 }
@@ -3301,10 +3557,11 @@ Codec<E> stringEnum(std::vector<std::pair<std::string, E>> values, std::string n
 // ListCodec
 // ---------------------------------------------------------------------------
 template <class A>
-Codec<std::vector<A>> listOf(const Codec<A>& elementCodec) {
-  Encoder<std::vector<A>> encoder([elementCodec](const std::vector<A>& input,
-                                                 const DynamicOps& ops,
-                                                 const JsonValue& prefix) {
+Codec<std::vector<A>> listOf(const Codec<A>& elementCodec,
+                             SourceLocation where = SourceLocation::current()) {
+  Encoder<std::vector<A>> encoder([elementCodec, where](const std::vector<A>& input,
+                                                        const DynamicOps& ops,
+                                                        const JsonValue& prefix) {
     const std::shared_ptr<ListBuilder> builder = ops.listBuilder();
     int32_t index = 0;
     for (const A& element : input) {
@@ -3312,12 +3569,12 @@ Codec<std::vector<A>> listOf(const Codec<A>& elementCodec) {
       builder->add(elementCodec.encodeStart(ops, element).addPath(index));
       ++index;
     }
-    return builder->build(prefix).addFrame("list");
+    return builder->build(prefix).addFrame("list", where);
   });
 
   Decoder<std::vector<A>> decoder(
-      [elementCodec](const DynamicOps& ops,
-                     const JsonValue& input)
+      [elementCodec, where](const DynamicOps& ops,
+                            const JsonValue& input)
           -> DataResult<std::pair<std::vector<A>, JsonValue>> {
     return ops.getList(input)
         .setLifecycle(Lifecycle::stable())
@@ -3345,7 +3602,7 @@ Codec<std::vector<A>> listOf(const Codec<A>& elementCodec) {
           const std::pair<std::vector<A>, JsonValue> pair(elements, errors);
           return result.map([&](const Unit&) { return pair; })
               .setPartial(pair)
-              .addFrame("list");
+              .addFrame("list", where);
         });
   });
 
@@ -3363,7 +3620,8 @@ inline Codec<std::vector<A>> Codec<A>::listOf() const {
 // EitherCodec
 // ---------------------------------------------------------------------------
 template <class F, class S>
-Codec<Either<F, S>> either(const Codec<F>& first, const Codec<S>& second) {
+Codec<Either<F, S>> either(const Codec<F>& first, const Codec<S>& second,
+                           SourceLocation where = SourceLocation::current()) {
   Encoder<Either<F, S>> encoder([first, second](const Either<F, S>& input,
                                                const DynamicOps& ops,
                                                const JsonValue& prefix) {
@@ -3371,7 +3629,8 @@ Codec<Either<F, S>> either(const Codec<F>& first, const Codec<S>& second) {
                           : second.encode(input.right(), ops, prefix);
   });
 
-  Decoder<Either<F, S>> decoder([first, second](const DynamicOps& ops, const JsonValue& input) {
+  Decoder<Either<F, S>> decoder([first, second, where](const DynamicOps& ops,
+                                                       const JsonValue& input) {
     const DataResult<std::pair<Either<F, S>, JsonValue>> firstRead =
         first.decode(ops, input).map([](const std::pair<F, JsonValue>& pair) {
           return std::make_pair(Either<F, S>::left(pair.first), pair.second);
@@ -3383,7 +3642,7 @@ Codec<Either<F, S>> either(const Codec<F>& first, const Codec<S>& second) {
         .map([](const std::pair<S, JsonValue>& pair) {
           return std::make_pair(Either<F, S>::right(pair.first), pair.second);
         })
-        .addFrame("either");
+        .addFrame("either", where);
   });
 
   return Codec<Either<F, S>>::of(Encoder<Either<F, S>>(std::move(encoder)),
@@ -3395,7 +3654,8 @@ Codec<Either<F, S>> either(const Codec<F>& first, const Codec<S>& second) {
 // PairCodec
 // ---------------------------------------------------------------------------
 template <class F, class S>
-Codec<std::pair<F, S>> pair(const Codec<F>& first, const Codec<S>& second) {
+Codec<std::pair<F, S>> pair(const Codec<F>& first, const Codec<S>& second,
+                            SourceLocation where = SourceLocation::current()) {
   Encoder<std::pair<F, S>> encoder([first, second](const std::pair<F, S>& value,
                                                   const DynamicOps& ops,
                                                   const JsonValue& rest) {
@@ -3403,14 +3663,15 @@ Codec<std::pair<F, S>> pair(const Codec<F>& first, const Codec<S>& second) {
         [&](const JsonValue& encoded) { return first.encode(value.first, ops, encoded); });
   });
 
-  Decoder<std::pair<F, S>> decoder([first, second](const DynamicOps& ops, const JsonValue& input) {
+  Decoder<std::pair<F, S>> decoder([first, second, where](const DynamicOps& ops,
+                                                          const JsonValue& input) {
     return first.decode(ops, input)
         .flatMap([&](const std::pair<F, JsonValue>& p1) {
           return second.decode(ops, p1.second).map([&](const std::pair<S, JsonValue>& p2) {
             return std::make_pair(std::make_pair(p1.first, p2.first), p2.second);
           });
         })
-        .addFrame("pair");
+        .addFrame("pair", where);
   });
 
   return Codec<std::pair<F, S>>::of(Encoder<std::pair<F, S>>(std::move(encoder)),
@@ -3422,21 +3683,25 @@ Codec<std::pair<F, S>> pair(const Codec<F>& first, const Codec<S>& second) {
 // UnboundedMapCodec (BaseMapCodec)
 // ---------------------------------------------------------------------------
 template <class K, class V>
-Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec, const Codec<V>& elementCodec) {
+Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec,
+                                                 const Codec<V>& elementCodec,
+                                                 SourceLocation where =
+                                                     SourceLocation::current()) {
   using Entry = std::pair<K, V>;
   using Entries = std::vector<Entry>;
 
-  Encoder<Entries> encoder([keyCodec, elementCodec](const Entries& input, const DynamicOps& ops,
-                                                   const JsonValue& prefix) {
+  Encoder<Entries> encoder([keyCodec, elementCodec, where](const Entries& input,
+                                                           const DynamicOps& ops,
+                                                           const JsonValue& prefix) {
     const std::shared_ptr<RecordBuilder> builder = ops.mapBuilder();
     for (const Entry& entry : input) {
       builder->add(keyCodec.encodeStart(ops, entry.first), elementCodec.encodeStart(ops, entry.second));
     }
-    return builder->build(prefix).addFrame("unboundedMap");
+    return builder->build(prefix).addFrame("unboundedMap", where);
   });
 
-  Decoder<Entries> decoder([keyCodec, elementCodec](const DynamicOps& ops,
-                                                    const JsonValue& input)
+  Decoder<Entries> decoder([keyCodec, elementCodec, where](const DynamicOps& ops,
+                                                           const JsonValue& input)
       -> DataResult<std::pair<Entries, JsonValue>> {
     return ops.getMap(input).setLifecycle(Lifecycle::stable()).flatMap(
         [&](const MapLikePtr& map) -> DataResult<std::pair<Entries, JsonValue>> {
@@ -3484,7 +3749,7 @@ Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec, const
               .mapError([&](const std::string& message) {
                 return message + " missed input: " + errors.dump();
               })
-              .addFrame("unboundedMap");
+              .addFrame("unboundedMap", where);
         });
   });
 
@@ -3575,7 +3840,7 @@ template <class K, class V>
 MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyCodec,
                                 std::function<DataResult<K>(const V&)> type,
                                 std::function<DataResult<Codec<V>>(const K&)> codecSelector,
-                                bool assumeMap) {
+                                bool assumeMap, SourceLocation where = SourceLocation::current()) {
   const auto keys = [typeKey](const DynamicOps& ops) {
     return std::vector<JsonValue>{ops.createString(typeKey), ops.createString("value")};
   };
@@ -3633,8 +3898,8 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
       keys);
 
   MapDecoder<V> decoder(
-      [typeKey, keyCodec, codecSelector, assumeMap](const DynamicOps& ops,
-                                                    const MapLike& input) -> DataResult<V> {
+      [typeKey, keyCodec, codecSelector, assumeMap, where](const DynamicOps& ops,
+                                                           const MapLike& input) -> DataResult<V> {
         const std::optional<JsonValue> elementName = input.get(typeKey);
         if (!elementName.has_value()) {
           return DataResult<V>::error("Input does not contain a key [" + typeKey + "]: " +
@@ -3671,7 +3936,7 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
                   });
             });
         if (decodedResult.isError()) {
-          decodedResult = decodedResult.addFrame("dispatch[" + typeKey + "]");
+          decodedResult = decodedResult.addFrame("dispatch[" + typeKey + "]", where);
         }
         return decodedResult;
       },
@@ -3683,28 +3948,31 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
 
 template <class A>
 template <class E, class TypeFn, class CodecFn>
-Codec<E> Codec<A>::partialDispatch(const std::string& typeKey, TypeFn type, CodecFn codec) const {
+Codec<E> Codec<A>::partialDispatch(const std::string& typeKey, TypeFn type, CodecFn codec,
+                                   SourceLocation where) const {
   return keyDispatchMapCodec<A, E>(
              typeKey, *this,
              [type](const E& value) -> DataResult<A> { return type(value); },
-             [codec](const A& key) -> DataResult<Codec<E>> { return codec(key); }, false)
+             [codec](const A& key) -> DataResult<Codec<E>> { return codec(key); }, false, where)
       .codec();
 }
 
 template <class A>
 template <class E, class TypeFn, class CodecFn>
-Codec<E> Codec<A>::dispatch(const std::string& typeKey, TypeFn type, CodecFn codec) const {
+Codec<E> Codec<A>::dispatch(const std::string& typeKey, TypeFn type, CodecFn codec,
+                            SourceLocation where) const {
   return partialDispatch<E>(
       typeKey, [type](const E& value) { return DataResult<A>::success(type(value)); },
-      [codec](const A& key) { return DataResult<Codec<E>>::success(codec(key)); });
+      [codec](const A& key) { return DataResult<Codec<E>>::success(codec(key)); }, where);
 }
 
 template <class A>
 template <class E, class TypeFn, class CodecFn>
-MapCodec<E> Codec<A>::dispatchMap(const std::string& typeKey, TypeFn type, CodecFn codec) const {
+MapCodec<E> Codec<A>::dispatchMap(const std::string& typeKey, TypeFn type, CodecFn codec,
+                                  SourceLocation where) const {
   return keyDispatchMapCodec<A, E>(
       typeKey, *this, [type](const E& value) { return DataResult<A>::success(type(value)); },
-      [codec](const A& key) { return DataResult<Codec<E>>::success(codec(key)); }, false);
+      [codec](const A& key) { return DataResult<Codec<E>>::success(codec(key)); }, false, where);
 }
 
 }  // namespace codec
@@ -3752,17 +4020,25 @@ class GetterField {
   using value_type = F;
 
   GetterField() = default;
-  GetterField(std::string name, std::function<F(const O&)> getter, MapCodec<F> codec)
-      : name_(std::move(name)), getter_(std::move(getter)), codec_(std::move(codec)) {}
+  GetterField(std::string name, std::function<F(const O&)> getter, MapCodec<F> codec,
+              SourceLocation where = {})
+      : name_(std::move(name)),
+        getter_(std::move(getter)),
+        codec_(std::move(codec)),
+        where_(where) {}
 
   const std::string& name() const { return name_; }
   F get(const O& object) const { return getter_(object); }
   const MapCodec<F>& codec() const { return codec_; }
+  // 该字段的构造位置；record 帧用它点回 record<O>(...) 那一行
+  // （可变参数调用无法捕获自身的调用点，所以用第一个字段的位置）。
+  SourceLocation where() const { return where_; }
 
  private:
   std::string name_;
   std::function<F(const O&)> getter_;
   MapCodec<F> codec_;
+  SourceLocation where_;
 };
 
 template <class O, class F>
@@ -3773,23 +4049,28 @@ class RecordField {
 
   RecordField() = default;
   RecordField(std::string name, std::function<F(const O&)> getter,
-              std::function<void(O&, F)> setter, MapCodec<F> codec)
+              std::function<void(O&, F)> setter, MapCodec<F> codec,
+              SourceLocation where = {})
       : name_(std::move(name)),
         getter_(std::move(getter)),
         setter_(std::move(setter)),
-        codec_(std::move(codec)) {}
+        codec_(std::move(codec)),
+        where_(where) {}
 
   const std::string& name() const { return name_; }
   F get(const O& object) const { return getter_(object); }
   void set(O& object, F value) const { setter_(object, std::move(value)); }
   const MapCodec<F>& codec() const { return codec_; }
   const std::function<void(O&, F)>& setter() const { return setter_; }
+  // 见 GetterField::where()。
+  SourceLocation where() const { return where_; }
 
  private:
   std::string name_;
   std::function<F(const O&)> getter_;
   std::function<void(O&, F)> setter_;
   MapCodec<F> codec_;
+  SourceLocation where_;
 };
 
 template <class T>
@@ -3812,8 +4093,8 @@ struct is_record_field<RecordField<O, F>> : std::true_type {};
 template <class F>
 class FieldBuilder {
  public:
-  FieldBuilder(std::string name, Codec<F> codec)
-      : name_(std::move(name)), codec_(std::move(codec)) {}
+  FieldBuilder(std::string name, Codec<F> codec, SourceLocation where = {})
+      : name_(std::move(name)), codec_(std::move(codec)), where_(where) {}
 
   MapCodec<F> map() const { return codec_.fieldOf(name_); }
 
@@ -3821,45 +4102,52 @@ class FieldBuilder {
   RecordField<O, F> forGetter(F O::*member) const {
     return RecordField<O, F>(
         name_, [member](const O& object) { return object.*member; },
-        [member](O& object, F value) { object.*member = std::move(value); }, codec_.fieldOf(name_));
+        [member](O& object, F value) { object.*member = std::move(value); },
+        codec_.fieldOf(name_), where_);
   }
 
   template <class O>
   GetterField<O, F> forGetter(std::function<F(const O&)> getter) const {
-    return GetterField<O, F>(name_, std::move(getter), codec_.fieldOf(name_));
+    return GetterField<O, F>(name_, std::move(getter), codec_.fieldOf(name_), where_);
   }
 
  private:
   std::string name_;
   Codec<F> codec_;
+  SourceLocation where_;
 };
 
 // fieldOf(name, codec) -- 一个 MapCodec<F> 字段构建器。
 template <class F>
-FieldBuilder<F> fieldOf(const std::string& name, const Codec<F>& codec) {
-  return FieldBuilder<F>(name, std::move(codec));
+FieldBuilder<F> fieldOf(const std::string& name, const Codec<F>& codec,
+                        SourceLocation where = SourceLocation::current()) {
+  return FieldBuilder<F>(name, std::move(codec), where);
 }
 
 // fieldOf(name, member, codec) -- 一个可设置字段。
 template <class O, class F>
-RecordField<O, F> fieldOf(const std::string& name, F O::*member, const Codec<F>& codec) {
-  return fieldOf(name, std::move(codec)).forGetter(member);
+RecordField<O, F> fieldOf(const std::string& name, F O::*member, const Codec<F>& codec,
+                          SourceLocation where = SourceLocation::current()) {
+  return fieldOf(name, std::move(codec), where).forGetter(member);
 }
 
 // optionalFieldOf(name, codec) -- 一个 std::optional<F> 的字段构建器。
 template <class F>
-FieldBuilder<std::optional<F>> optionalFieldOf(const std::string& name, const Codec<F>& codec) {
-  return FieldBuilder<std::optional<F>>(name, optionalField(name, std::move(codec)));
+FieldBuilder<std::optional<F>> optionalFieldOf(const std::string& name, const Codec<F>& codec,
+                                               SourceLocation where = SourceLocation::current()) {
+  return FieldBuilder<std::optional<F>>(name, optionalField(name, std::move(codec)), where);
 }
 
 // optionalFieldOf(name, member, codec) -- member 是一个 std::optional<F>。
 template <class O, class F>
 RecordField<O, std::optional<F>> optionalFieldOf(const std::string& name,
-                                                std::optional<F> O::*member, const Codec<F>& codec) {
+                                                 std::optional<F> O::*member,
+                                                 const Codec<F>& codec,
+                                                 SourceLocation where = SourceLocation::current()) {
   return RecordField<O, std::optional<F>>(
       name, [member](const O& object) { return object.*member; },
       [member](O& object, std::optional<F> value) { object.*member = std::move(value); },
-      optionalField(name, std::move(codec)));
+      optionalField(name, std::move(codec)), where);
 }
 
 // optionalFieldOf(name, member, codec, defaultValue) -- 缺失的成员会解码为
@@ -3867,42 +4155,43 @@ RecordField<O, std::optional<F>> optionalFieldOf(const std::string& name,
 // Codec.optionalFieldOf(String, A)）。
 template <class O, class F>
 RecordField<O, F> optionalFieldOf(const std::string& name, F O::*member, const Codec<F>& codec,
-                                  F defaultValue) {
+                                  F defaultValue, SourceLocation where = SourceLocation::current()) {
   return RecordField<O, F>(
       name, [member](const O& object) { return object.*member; },
       [member](O& object, F value) { object.*member = std::move(value); },
-      codec.optionalFieldOf(name, std::move(defaultValue)));
+      codec.optionalFieldOf(name, std::move(defaultValue)), where);
 }
 
 // optionalFieldOfStrict(name, member, codec) -- 新增：类似 optionalFieldOf，
 // 但值存在却非法时会带着其位置失败，而不是被静默视为缺失。
 // 校验时优先使用它（见 optionalFieldStrict）。
 template <class O, class F>
-RecordField<O, std::optional<F>> optionalFieldOfStrict(const std::string& name,
-                                                      std::optional<F> O::*member,
-                                                      const Codec<F>& codec) {
+RecordField<O, std::optional<F>> optionalFieldOfStrict(
+    const std::string& name, std::optional<F> O::*member, const Codec<F>& codec,
+    SourceLocation where = SourceLocation::current()) {
   return RecordField<O, std::optional<F>>(
       name, [member](const O& object) { return object.*member; },
       [member](O& object, std::optional<F> value) { object.*member = std::move(value); },
-      optionalFieldStrict(name, codec));
+      optionalFieldStrict(name, codec, where), where);
 }
 
 // optionalFieldOfStrict(name, member, codec, defaultValue) -- 新增：缺失的
 // 成员会解码为 defaultValue，但值存在却非法则是一个错误。
 template <class O, class F>
 RecordField<O, F> optionalFieldOfStrict(const std::string& name, F O::*member,
-                                       const Codec<F>& codec, F defaultValue) {
+                                        const Codec<F>& codec, F defaultValue,
+                                        SourceLocation where = SourceLocation::current()) {
   return RecordField<O, F>(
       name, [member](const O& object) { return object.*member; },
       [member](O& object, F value) { object.*member = std::move(value); },
-      codec.optionalFieldOfStrict(name, std::move(defaultValue)));
+      codec.optionalFieldOfStrict(name, std::move(defaultValue)), where);
 }
 
 // MapCodec.forGetter -- DFU 的 mapCodec.forGetter(getter)。
 template <class A>
 template <class O>
 inline GetterField<O, A> MapCodec<A>::forGetter(std::function<A(const O&)> getter) const {
-  return GetterField<O, A>("<map>", std::move(getter), *this);
+  return GetterField<O, A>("<map>", std::move(getter), *this, SourceLocation::current());
 }
 
 // ---------------------------------------------------------------------------
@@ -3987,6 +4276,18 @@ std::string joinFieldNames(const FieldsTuple& fields, std::index_sequence<I...>)
   return out;
 }
 
+// record 帧的源码位置。可变参数函数无法捕获自己的调用点，因此取第一个
+// 字段的构造位置：`record<O>(...)` 的参数都写在同一处，
+// 行号相同或只差一行。
+template <class... Fields>
+SourceLocation recordLocation(const std::tuple<Fields...>& fields) {
+  if constexpr (sizeof...(Fields) == 0) {
+    return SourceLocation{};
+  } else {
+    return std::get<0>(fields).where();
+  }
+}
+
 // 把每个字段按声明顺序编码进同一个 RecordBuilder。
 template <class O, class FieldsTuple, std::size_t... I>
 RecordBuilder& encodeFields(const FieldsTuple& fields, const O& input, const DynamicOps& ops,
@@ -4029,9 +4330,11 @@ MapCodec<O> record(Fields... fields) {
   const std::string codecName =
       "RecordCodec[" +
       detail::joinFieldNames(fieldsTuple, std::index_sequence_for<Fields...>{}) + "]";
+  const SourceLocation where = detail::recordLocation(fieldsTuple);
 
   MapDecoder<O> decoder(
-      [fieldsTuple, ctor, codecName](const DynamicOps& ops, const MapLike& input) -> DataResult<O> {
+      [fieldsTuple, ctor, codecName, where](const DynamicOps& ops,
+                                            const MapLike& input) -> DataResult<O> {
         const std::tuple<DataResult<typename Fields::value_type>...> results =
             std::apply(
                 [&](const auto&... field) {
@@ -4047,10 +4350,10 @@ MapCodec<O> record(Fields... fields) {
             return DataResult<O>::success(std::move(built), summary.lifecycle);
           }
           return DataResult<O>::errorParts(summary.errors, std::move(built), summary.lifecycle)
-              .addFrame(codecName);
+              .addFrame(codecName, where);
         }
         return DataResult<O>::errorParts(summary.errors, std::nullopt, summary.lifecycle)
-            .addFrame(codecName);
+            .addFrame(codecName, where);
       },
       [fieldsTuple](const DynamicOps& ops) {
         return detail::fieldEncoderKeys(fieldsTuple, ops, std::index_sequence_for<Fields...>{});
@@ -4083,9 +4386,11 @@ MapCodec<O> record(Ctor ctor, Fields... fields) {
       "RecordCodec[" +
       detail::joinFieldNames(fieldsTuple, std::index_sequence_for<Fields...>{}) + "]";
 
+  const SourceLocation where = detail::recordLocation(fieldsTuple);
+
   MapDecoder<O> decoder(
-      [fieldsTuple, constructor, codecName](const DynamicOps& ops,
-                                            const MapLike& input) -> DataResult<O> {
+      [fieldsTuple, constructor, codecName, where](const DynamicOps& ops,
+                                                   const MapLike& input) -> DataResult<O> {
         const std::tuple<DataResult<typename Fields::value_type>...> results =
             std::apply(
                 [&](const auto&... field) {
@@ -4102,10 +4407,10 @@ MapCodec<O> record(Ctor ctor, Fields... fields) {
             return DataResult<O>::success(std::move(built), summary.lifecycle);
           }
           return DataResult<O>::errorParts(summary.errors, std::move(built), summary.lifecycle)
-              .addFrame(codecName);
+              .addFrame(codecName, where);
         }
         return DataResult<O>::errorParts(summary.errors, std::nullopt, summary.lifecycle)
-            .addFrame(codecName);
+            .addFrame(codecName, where);
       },
       [fieldsTuple](const DynamicOps& ops) {
         return detail::fieldDecoderKeys(fieldsTuple, ops, std::index_sequence_for<Fields...>{});

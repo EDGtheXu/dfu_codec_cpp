@@ -11,9 +11,9 @@
 `reference/dfu-6.0.8/`。这些源码属于 Mojang，仅作阅读参考——不参与构建，也刻意
 不纳入版本管理——脚本的作用是让本次移植的来源可复现。
 
-* 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 4 100 行，CMake `INTERFACE` 目标，无需编译任何源文件
+* 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 4 400 行，CMake `INTERFACE` 目标，无需编译任何源文件
 * 头文件内的注释为**中文**；API 名、错误消息、测试名与两份 README 保持中英各自原本的语言
-* 分层测试：[`test/unit/`](test/unit)（142 个用例）、[`test/smoke/`](test/smoke)
+* 分层测试：[`test/unit/`](test/unit)（148 个用例）、[`test/smoke/`](test/smoke)
   （23 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
   性能对比）——每层一个独立可执行文件
 * 参考用例（风险定义文档）：[`models/risk_def.hpp`](models/risk_def.hpp)
@@ -46,10 +46,14 @@ DataResult<JsonValue> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, valu
 
 | 依赖 | 版本 | 位置 |
 | --- | --- | --- |
-| C++ | **C++17**（`/std:c++17`、`-std=c++17`） | 必需 |
+| C++ | **C++17**（`/std:c++17`、`-std=c++17`） | 必需（C++20/23 可解锁下面可选的诊断能力） |
 | [nlohmann/json](https://github.com/nlohmann/json) | 3.12.0（单头文件） | `third_party/nlohmann/json.hpp` |
 | [GoogleTest](https://github.com/google/googletest) | 1.17.0 | `third_party/googletest-1.17.0`（仅测试用） |
 | CMake | ≥ 3.16，Ninja 或 MSBuild | 构建 |
+
+库本身是 header-only，没有什么需要配置的；但由于头文件注释是中文，**在这个工程的
+CMake 目标之外**直接用 MSVC 编译时需要 `/utf-8`（或 `/source-charset:utf-8`）——
+`codec` 目标已经加上了。
 
 ```powershell
 # 1. 拉取 nlohmann/json 与 GoogleTest（需要代理时加 -Proxy http://127.0.0.1:7890）
@@ -64,10 +68,20 @@ powershell -File scripts/build.ps1 -RunTests
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 全部测试层，168 个用例
+ctest --test-dir build --output-on-failure   # 全部测试层，174 个用例
 cmake --build build --target check           # 等价的一键目标
 build/examples/risk_def_example.exe          # 可选：示例文档演示
+
+# 可选：为每个错误额外抓取真正的 std::stacktrace（会把构建切到 C++23）
+cmake -S . -B cmake-build-stacktrace -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEC_RECORD_STACKTRACE=ON
 ```
+
+| CMake 选项 | 默认 | 作用 |
+| --- | --- | --- |
+| `CODEC_BUILD_TESTS` | `ON` | 构建三个测试层 |
+| `CODEC_BUILD_EXAMPLES` | `ON` | 构建示例程序 |
+| `CODEC_WARNINGS_AS_ERRORS` | `OFF` | `/WX`、`-Werror` |
+| `CODEC_RECORD_STACKTRACE` | `OFF` | 定义 `CODEC_RECORD_STACKTRACE`、按 C++23 编译，并为每个错误抓取 `std::stacktrace` |
 
 三个测试层是相互独立的可执行文件，因此也可以直接运行：
 
@@ -293,6 +307,65 @@ risks[3].condition.or[0].op: Not a string: 1
   嵌套列表、多处失败、缺失键、无界 map、dispatch 载荷与编码侧（`FrameTest` 管调用链，
   `ErrorPathTest` 管位置）。
 
+**可点击的栈帧，且跨平台。** 每一帧还带「构造该 codec 的位置」，因此 `report()` 同时也
+是一份能在 IDE 里点开的调用栈：
+
+```text
+risks[3].condition.or[0].op: Not a string: 1
+  0> D:\programming\cpp\Codec\include\codec.hpp(3445): String
+  1> D:\programming\cpp\Codec\models\risk_def.hpp(116): optional[op]
+  2> D:\programming\cpp\Codec\models\risk_def.hpp(109): RecordCodec[or, and, not, param, op, value, list_match]
+  ...
+```
+
+* 位置来自三级 `SourceLocation`：标准库有 `std::source_location`（C++20）就用它，否则用
+  MSVC/GCC/Clang 在 C++17 下都支持的 `__builtin_FILE()`/`__builtin_LINE()`，两者都没有
+  就退化为「没有位置」。代码永远能编译，降级的只是诊断信息。
+* 它是编译期字面量：不分配内存、不需要调试信息（PDB/DWARF），因此 Release 下同样可用。
+* `report(FrameStyle::native | msvc | gnu)` 选择排版：MSVC 的 `file(line):` 形式（与它自家
+  `<stacktrace>` 输出同形），或 gdb 风格的 `#0 name at file:line`。CLion 两种都能点开，
+  `native` 跟随编译器。模型里构造的帧指向你的 `record<...>`/`fieldOf(...)` 那一行，
+  库内部的帧指向 `codec.hpp`。
+
+**用抛异常代替返回。** 不想检查 `DataResult` 时：
+
+```cpp
+try {
+  RiskDocument document = riskDocumentCodec().parse(JsonOps::INSTANCE, input).throwIfError();
+} catch (const codec::CodecError& error) {
+  error.what();       // "risks[3].condition.or[0].op: Not a string: 1"（单行）
+  error.report();     // 同上，再加带位置的 codec 调用链
+  error.location();   // "risks[3].condition.or[0].op"
+  error.errors();     // 各失败部分（路径 + 帧 + 消息）
+  error.hasPartial(); // 是否带着可用的部分值
+}
+```
+
+* `CodecError` 派生自 `std::runtime_error`，因此既有的 `catch (const std::exception&)`
+  继续有效；DFU 的 `getOrThrow(allowPartial, onError)` 现在也抛它。
+* 不需要编译器内建、不需要 C++20/23、也不需要调试信息——这是传播诊断信息最跨平台的
+  方式；在任何调试器里对 `CodecError` 下断点都能看到真正的调用栈。
+
+**标准库提供时，还能给出真正的调用栈。** 加上 `-DCODEC_RECORD_STACKTRACE=ON`（会把构建
+切到 C++23）后，错误产生的那一刻会抓取 `std::stacktrace` 并附在 `report()` 之后：
+
+```text
+[1]: Not a number: "x"
+  0> D:\programming\cpp\Codec\include\codec.hpp(3445): Int
+  1> D:\programming\cpp\Codec\build\zh\print_stacktrace.cpp(16): list
+  stacktrace:
+    0> D:\programming\cpp\Codec\include\codec.hpp(1074): demo!codec::DataResult<codec::Number>::makeErrorPart+0x66
+    ...
+    21> D:\programming\cpp\Codec\build\zh\print_stacktrace.cpp(17): demo!main+0x111
+```
+
+* 排版由标准库自己完成，因此天然就是你工具链 IDE 能解析的格式；带调试信息时
+  （MSVC `/Zi`，即 Debug 构建）每帧都有 `file(line)`，libstdc++/libc++ 则是 `file:line`
+  ——**包括调用 `parse()` 的那一行**，这是 codec 调用链本身给不出的信息。
+* 默认关闭：抓栈对*每个*错误都要付费，包括 DFU 有意吞掉的「存在但非法的可选字段」。
+  没有 C++23 时头文件仍是普通的 C++17 头文件，这一层根本不存在
+  （`test/unit/stacktrace_test.cpp` 会跳过自己）。
+
 **严格可选字段。** 路径只有在错误不被吞掉时才有意义，而 DFU 的 `OptionalFieldCodec`
 恰恰会吞掉"存在但非法"的可选值。做校验时你需要那个错误，因此本移植提供了会传播错误的
 对应版本：
@@ -346,20 +419,21 @@ Codec<Condition> conditionCodec() {
   `list_match` 谓词以及 UTF-8 的 `cn`/`en` 字符串；
 * 重新编码与输入文档的紧凑序列化结果**逐字节一致**（record 字段顺序与文档一致）；
 * decode → encode → decode 稳定，手工构造的文档同样可以正常往返；
-* 非法规则会带上准确位置和处理它的 codec 调用链，`risk_def_example.exe bad.json` 输出：
+* 非法规则会带上准确位置和处理它的 codec 调用链，每一帧还带构造它的那一行——
+  `risk_def_example.exe bad.json` 输出（CLion 里每个 `文件(行号)` 都可点击）：
 
   ```text
   risks[0].condition.or[0].op: Not a string: 1
-    in String
-    in optional[op]
-    in RecordCodec[or, and, not, param, op, value, list_match]
-    in list
-    in optional[or]
-    in RecordCodec[or, and, not, param, op, value, list_match]
-    in optional[condition]
-    in RecordCodec[id, vid, risk_type, severity, name, description, solution, condition, evidence]
-    in list
-    in RecordCodec[risks]
+    0> D:\programming\cpp\Codec\include\codec.hpp(3477): String
+    1> D:\programming\cpp\Codec\models\risk_def.hpp(116): optional[op]
+    2> D:\programming\cpp\Codec\models\risk_def.hpp(109): RecordCodec[or, and, not, param, op, value, list_match]
+    3> D:\programming\cpp\Codec\models\risk_def.hpp(109): list
+    4> D:\programming\cpp\Codec\include\codec.hpp(3326): optional[or]
+    5> D:\programming\cpp\Codec\models\risk_def.hpp(109): RecordCodec[or, and, not, param, op, value, list_match]
+    6> D:\programming\cpp\Codec\models\risk_def.hpp(134): optional[condition]
+    7> D:\programming\cpp\Codec\models\risk_def.hpp(127): RecordCodec[id, vid, risk_type, severity, name, description, solution, condition, evidence]
+    8> D:\programming\cpp\Codec\models\risk_def.hpp(141): list
+    9> D:\programming\cpp\Codec\models\risk_def.hpp(141): RecordCodec[risks]
   ```
 
   条件树是递归的，所以同一个 `RecordCodec` 会在两层出现。模型使用严格可选字段，
@@ -402,15 +476,18 @@ Codec<Condition> conditionCodec() {
 | `Codec.optionalFieldOf(name, Lifecycle, …)` | 4 参数重载 | 未移植 | 极少使用；`.stable()` 已可覆盖 |
 | `codec::recursive<A>(supplier)`（**新增**） | —（Java 通过 datafixer 图表达递归） | 提供 | 首次使用时才解析 supplier，同时打破静态初始化环 |
 | `codecs::stringEnum<E>(table, name)`（**新增**） | —（MC 用 `StringRepresentable.fromEnum`，它不在 DFU 里） | 提供 | 用名字表处理枚举、免去样板代码；基于 `flatXmap` 实现，因此可像其他 codec 一样组合 |
-| `DataResult::location()` / `describe()` / `report()`（**新增**） | 任何地方都没有位置信息 | 每个字段/元素/map 条目都附加路径，每个 codec 附加自己的名字 | 消息保持与 DFU 一致；`describe()` 上报 `risks[3].condition.or[0].op: Not a string: 1`，`report()` 再附上 codec 调用链 |
+| `DataResult::location()` / `describe()` / `report()`（**新增**） | 任何地方都没有位置信息 | 每个字段/元素/map 条目都附加路径，每个 codec 附加自己的名字与构造位置 | 消息保持与 DFU 一致；`describe()` 上报 `risks[3].condition.or[0].op: Not a string: 1`，`report()` 再附上带可点击 `file(line)` 帧的 codec 调用链 |
+| `SourceLocation` + `report(FrameStyle)`（**新增**） | — | 依次尝试 `std::source_location` / `__builtin_FILE/LINE` / 无 | 跨平台的可点击栈帧，不需要调试信息；缺能力时降级而不是编译失败 |
+| `DataResult::throwIfError()` / `codec::CodecError`（**新增**） | `getOrThrow` 抛 `RuntimeException` | 携带位置、帧、各部分与部分值标志的 `std::runtime_error` 子类 | 跨平台的「抛而不是返回」，仍可按 `std::exception` 捕获 |
+| `CODEC_RECORD_STACKTRACE`（**新增**） | 没有任何栈回溯 | 失败时抓取 `std::stacktrace`，由标准库排版 | 仅 C++23、且需显式开启；有调试信息时成为可点击的 `file(line)` |
 | `optionalFieldStrict` / `optionalFieldOfStrict`（**新增**） | `OptionalFieldCodec` 会吞掉"存在但非法"的值 | 会传播错误的对应版本 | 校验器不能把坏值当成"不存在" |
 
 ## 6. 测试分层
 
-168 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
+174 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
 前缀（`unit.*`、`smoke.*`、`perf.*`），因此任何一层都可以按组选择运行。
 
-**`test/unit/` → `codec_unit_tests`（142 个用例）**——组件级，覆盖各种边界情况：
+**`test/unit/` → `codec_unit_tests`（148 个用例）**——组件级，覆盖各种边界情况：
 
 | 文件 | 关注点 |
 | --- | --- |
@@ -423,7 +500,8 @@ Codec<Condition> conditionCodec() {
 | `record_codec_test.cpp` | 各种形式的 `record<>`、`fieldOf`/`optionalFieldOf`/`forGetter`、错误合并、部分对象、keys、压缩 |
 | `dispatch_test.cpp` | `KeyDispatchCodec`（`partialDispatch`/`dispatch`/`dispatchMap`）、map codec 载荷合并、压缩 dispatch |
 | `string_and_enum_test.cpp` | 标量转换示例集：数字↔枚举、字符串↔枚举（含 `codecs::stringEnum`）、字符串↔数字、`either` 实现"数字或字符串"、枚举用于字段/列表/可选字段 |
-| `error_path_test.cpp` | 错误定位：目标格式 `risks[3].condition.or[0].op`、改写消息措辞、嵌套列表、多字段同时失败、缺失键、无界 map、dispatch 载荷、编码侧、严格/宽松可选字段对比；`FrameTest` 固定 `report()` 的 codec 调用链（record、list、optional、dispatch，以及多处失败各一段） |
+| `error_path_test.cpp` | 错误定位：目标格式 `risks[3].condition.or[0].op`、改写消息措辞、嵌套列表、多字段同时失败、缺失键、无界 map、dispatch 载荷、编码侧、严格/宽松可选字段对比；`FrameTest` 固定 `report()` 的 codec 调用链、每帧的 `file(line)` 构造位置与两种排版，`CodecErrorTest` 覆盖 `throwIfError()` / `getOrThrow()` |
+| `stacktrace_test.cpp` | 可选的 `std::stacktrace` 层：特性探测一致性、抓栈与标准库排版输出；未打开 `CODEC_RECORD_STACKTRACE` 时跳过自己 |
 | `odr_test.cpp` + `odr_probe.cpp` | 仅头文件保证：两个都包含该单头文件的翻译单元能一起链接，且 inline 单例在两个 TU 中地址一致 |
 | `header_self_contained_test.cpp` | 在其余所有头文件之前包含 `codec.hpp`，证明单头文件可独立编译 |
 

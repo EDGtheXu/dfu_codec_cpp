@@ -19,7 +19,7 @@ function(codec_configure_test target)
     "${CMAKE_SOURCE_DIR}/models"
   )
   if(MSVC)
-    target_compile_options(${target} PRIVATE /utf-8 /W4 /permissive-)
+    target_compile_options(${target} PRIVATE /utf-8 /W4 /permissive- /bigobj)
   else()
     target_compile_options(${target} PRIVATE -Wall -Wextra)
   endif()
