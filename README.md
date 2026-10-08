@@ -1,5 +1,7 @@
 # Codec — a C++17 port of Mojang's DataFixerUpper `Codec` API
 
+**English** | [简体中文](README_zh.md)
+
 A faithful C++17 port of the `com.mojang.serialization` package from
 **DataFixerUpper 6.0.8** — the `Codec` / `MapCodec` / `RecordCodecBuilder` /
 `DynamicOps` / `DataResult` mechanism that Minecraft uses to serialise and
