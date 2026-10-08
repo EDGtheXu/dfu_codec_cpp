@@ -13,3 +13,6 @@ cmake-build-*/
 # Decompiled Mojang code, kept locally for reference only; regenerate with
 # scripts/decompile_reference.ps1
 reference/
+
+# MSVC / toolchain artifacts
+*.pdb

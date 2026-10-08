@@ -15,6 +15,7 @@ The reference implementation was decompiled from
 the port's provenance can be reproduced.
 
 * Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~4 100 lines, CMake `INTERFACE` target, nothing to build
+* Comments inside the header are written in **Chinese**; API names, error messages, test names and both READMEs stay English
 * Layered tests: [`test/unit/`](test/unit) (142 cases), [`test/smoke/`](test/smoke) (23 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)

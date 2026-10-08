@@ -1,19 +1,19 @@
-// A C++17 port of Mojang's DataFixerUpper `com.mojang.serialization` Codec API.
+// Mojang DataFixerUpper `com.mojang.serialization` Codec API 的 C++17 移植。
 //
 //                              codec.hpp
-//                  single-header, header-only library
+//                  单头文件、header-only 库
 //
-// A faithful port of the Codec / MapCodec / RecordCodecBuilder / DynamicOps /
-// DataResult mechanism from DataFixerUpper 6.0.8 (com.mojang:datafixerupper),
-// the machinery Minecraft uses to serialise and deserialise everything from
-// registry entries to world data.
+// 对 DataFixerUpper 6.0.8（com.mojang:datafixerupper）中 Codec / MapCodec /
+// RecordCodecBuilder / DynamicOps / DataResult 机制的忠实移植，
+// 也就是 Minecraft 用来序列化与反序列化从注册表条目到世界数据
+// 的一切内容的那套机制。
 //
-// Usage
+// 用法
 // -----
 //     #include "codec.hpp"
 //
-// Everything lives in `namespace codec`; the CMake target is `codec`
-// (alias `codec::codec`), an INTERFACE library, so there is nothing to build.
+// 一切都在 `namespace codec` 中；CMake 目标是 `codec`
+// （别名 `codec::codec`），一个 INTERFACE 库，因此无需构建任何东西。
 //
 //     Codec<RiskDef> riskDefCodec = record<RiskDef>(
 //         fieldOf("id",  &RiskDef::id,  codecs::String),
@@ -24,35 +24,35 @@
 //                                                       JsonValue::parse(text));
 //     DataResult<JsonValue> encoded = riskDefCodec.encodeStart(JsonOps::INSTANCE, value);
 //
-// Dependencies
+// 依赖
 // ------------
 //   * C++17
-//   * nlohmann/json 3.12.0 -- the JSON parser/serializer/DOM behind JsonValue
-//     (only the JsonValue section below uses it; the codec layer never sees it).
-//     Fetch it with scripts/fetch_deps.ps1 into third_party/.
+//   * nlohmann/json 3.12.0 —— JsonValue 背后的 JSON 解析器/序列化器/DOM
+//     （只有下面的 JsonValue 一节用到它；codec 层从不会看到它）。
+//     用 scripts/fetch_deps.ps1 把它拉到 third_party/。
 //
-// Contents
+// 内容
 // --------
-// Sections appear in dependency order and are named after the per-area headers
-// this single file replaces; comments such as "see dynamic_ops.hpp" refer to the
-// section of that name below.
+// 各小节按依赖顺序排列，并以这个单文件所取代的
+// 各分区头文件命名；形如 "see dynamic_ops.hpp" 的注释
+// 指的是下面同名的小节。
 //
-//   1. json          JsonValue (nlohmann-backed) + Number (java.lang.Number)
+//   1. json          JsonValue（基于 nlohmann）+ Number（java.lang.Number）
 //   2. lifecycle     Lifecycle
-//   3. data_result   DataResult, PartialResult semantics, Unit
-//   4. dynamic_ops   DynamicOps, MapLike, RecordBuilder, ListBuilder, KeyCompressor
-//   5. json_ops      JsonOps (INSTANCE / COMPRESSED)
-//   6. codec         Encoder, Decoder, MapEncoder, MapDecoder, Codec, MapCodec
-//   7. codecs        primitive + composite codecs, range checks, recursive, dispatch
-//   8. record_codec  RecordCodecBuilder: record<>, fieldOf, optionalFieldOf, forGetter
+//   3. data_result   DataResult、PartialResult 语义、Unit
+//   4. dynamic_ops   DynamicOps、MapLike、RecordBuilder、ListBuilder、KeyCompressor
+//   5. json_ops      JsonOps（INSTANCE / COMPRESSED）
+//   6. codec         Encoder、Decoder、MapEncoder、MapDecoder、Codec、MapCodec
+//   7. codecs        基础与组合 codec、范围校验、recursive、dispatch
+//   8. record_codec  RecordCodecBuilder：record<>、fieldOf、optionalFieldOf、forGetter
 //
-// Behaviour, deliberate deviations from DFU and the test layers are documented in
-// README.md (README_zh.md).  The reference Java sources are not part of the
-// library; scripts/decompile_reference.ps1 reproduces them for study.
+// 行为、对 DFU 的有意偏离以及各测试层都记录在
+// README.md（README_zh.md）中。参考 Java 源码不属于这个
+// 库；scripts/decompile_reference.ps1 可以复现它们以供研究。
 
 #pragma once
 
-// --- standard library -------------------------------------------------------
+// --- 标准库 --------------------------------------------------------------------
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -74,37 +74,37 @@
 #include <variant>
 #include <vector>
 
-// --- third-party ------------------------------------------------------------
+// --- 第三方 --------------------------------------------------------------------
 #include <nlohmann/json.hpp>
 
 // ===========================================================================
-// 1/8  json.hpp -- JsonValue (nlohmann-backed) + Number (java.lang.Number)
+// 1/8  json.hpp -- JsonValue（基于 nlohmann）+ Number（java.lang.Number）
 // ===========================================================================
 
-// A C++17 port of Mojang's DataFixerUpper `com.mojang.serialization` Codec API.
+// Mojang DataFixerUpper `com.mojang.serialization` Codec API 的 C++17 移植。
 //
-// json.hpp -- the dynamic value type used as the serialized form ("T" in DFU's
-// DynamicOps<T>) plus the numeric wrapper mirroring java.lang.Number.
+// json.hpp —— 用作序列化形式的动态值类型（DFU 的 DynamicOps<T> 中的 "T"）
+// 加上对应 java.lang.Number 的数值包装类型。
 //
-// In DataFixerUpper the serialized value type is Gson's JsonElement (see
-// JsonOps).  This port stores a nlohmann/json document instead
-// (<https://github.com/nlohmann/json>), specifically nlohmann::ordered_json, so
-// that objects keep their insertion order exactly like Gson's
-// LinkedTreeMap-backed JsonObject and that member assignment replaces in place.
+// 在 DataFixerUpper 中，序列化值类型是 Gson 的 JsonElement（见
+// JsonOps）。本移植改为存储 nlohmann/json 文档
+// （<https://github.com/nlohmann/json>），具体是 nlohmann::ordered_json，
+// 从而让对象与 Gson 基于 LinkedTreeMap 的 JsonObject 一样保持插入顺序，
+// 并且对成员赋值是原地替换。
 //
-// `JsonValue` is a thin reference-semantics facade over nlohmann::ordered_json:
-//   * the codec layer talks to DynamicOps/JsonValue and never to nlohmann,
-//   * applications can hand a nlohmann document straight in (JsonValue has an
-//     implicit constructor from nlohmann::ordered_json) and get it back with
-//     raw(), so the parser and serializer are nlohmann's.
+// `JsonValue` 是 nlohmann::ordered_json 之上的一层薄封装，具有引用语义：
+//   * codec 层只与 DynamicOps/JsonValue 打交道，从不接触 nlohmann，
+//   * 应用可以直接传入 nlohmann 文档（JsonValue 有来自
+//     nlohmann::ordered_json 的隐式构造函数），再用 raw() 取回，
+//     因此解析器与序列化器都是 nlohmann 的。
 
 
 
 namespace codec {
 
 // ---------------------------------------------------------------------------
-// Number -- mirrors java.lang.Number as used by DynamicOps.getNumberValue(),
-// DynamicOps.createNumeric() and the primitive codecs (`Number::intValue()`).
+// Number —— 与 java.lang.Number 对应，用于 DynamicOps.getNumberValue()、
+// DynamicOps.createNumeric() 以及各基础类型 codec（`Number::intValue()`）。
 // ---------------------------------------------------------------------------
 class Number {
  public:
@@ -142,7 +142,7 @@ class Number {
     }
     return static_cast<int64_t>(d_);
   }
-  // Java semantics: narrowing truncation of the (already truncated) long value.
+  // Java 语义：对（已经截断过的）long 值做窄化截断。
   int32_t intValue() const { return static_cast<int32_t>(longValue()); }
   int16_t shortValue() const { return static_cast<int16_t>(longValue()); }
   int8_t byteValue() const { return static_cast<int8_t>(longValue()); }
@@ -152,8 +152,8 @@ class Number {
 
   std::string toString() const;
 
-  // Gson's JsonPrimitive numeric equality: integral/integral compares long
-  // values, otherwise compares doubles.
+  // Gson 的 JsonPrimitive 数值相等性：integral/integral 时比较 long
+  // 值，否则比较 double。
   bool equals(const Number& other) const {
     if (integral_ && other.integral_) {
       return i_ == other.i_;
@@ -176,8 +176,8 @@ class Number {
 
 namespace detail {
 
-// Shortest decimal representation that round-trips, without relying on
-// std::to_chars(double) (which C++17 does not require).
+// 能往返的最短十进制表示，且不依赖
+// std::to_chars(double)（C++17 并不要求它）。
 inline std::string doubleToString(double value) {
   if (std::isnan(value)) {
     return "NaN";
@@ -193,7 +193,7 @@ inline std::string doubleToString(double value) {
     }
   }
   std::string text(buffer);
-  // Keep the value recognisable as a floating point literal (Gson prints 1.0).
+  // 让该值仍能辨认出是浮点字面量（Gson 会输出 1.0）。
   if (text.find_first_of(".eE") == std::string::npos && text.find_first_of("nN") == std::string::npos) {
     text += ".0";
   }
@@ -212,17 +212,17 @@ class JsonParseError : public std::runtime_error {
 };
 
 // ---------------------------------------------------------------------------
-// JsonValue -- the dynamic serialized value (DFU's "JsonElement")
+// JsonValue —— 动态的已序列化值（DFU 的 "JsonElement"）
 //
-// Backed by nlohmann::ordered_json: parsing, serialisation and the DOM are
-// nlohmann/json's; the facade keeps the small API the codec layer needs
-// (Gson-like typed accessors, null filtering, ordered member access and
-// Gson-style equality).
+// 由 nlohmann::ordered_json 支撑：解析、序列化与 DOM 都归 nlohmann/json；
+// 这一层门面只保留 codec 层需要的那一小套 API
+// （类 Gson 的类型化访问器、null 过滤、有序成员访问以及
+// Gson 风格的相等性）。
 //
-// Like Gson's JsonElement, JsonValue has *reference* semantics: a handle owns the
-// document it was created from (shared_ptr) and points at one node inside it, so
-// copying a handle, reading a member or walking an array is O(1) and never
-// duplicates the DOM.  Values are immutable once built.
+// 与 Gson 的 JsonElement 一样，JsonValue 具有*引用*语义：一个句柄拥有它
+// 创建时来自的那份文档（shared_ptr），并指向其中的一个节点，因此
+// 复制句柄、读取成员或遍历数组都是 O(1)，且从不
+// 复制 DOM。值一旦构建完成即不可变。
 // ---------------------------------------------------------------------------
 class JsonValue {
  public:
@@ -232,13 +232,13 @@ class JsonValue {
   using Object = std::vector<std::pair<std::string, JsonValue>>;
 
   JsonValue();
-  JsonValue(const Raw& raw);  // NOLINT(google-explicit-constructor) -- copies into a new node
-  JsonValue(Raw&& raw);       // NOLINT(google-explicit-constructor) -- takes ownership
+  JsonValue(const Raw& raw);  // NOLINT(google-explicit-constructor) -- 复制到一个新节点
+  JsonValue(Raw&& raw);       // NOLINT(google-explicit-constructor) -- 取得所有权
 
-  // Zero-copy view: `owner` keeps the document alive and `node` must point at a
-  // node inside it (or at the root).  Used internally to hand out members and
-  // elements without copying; also handy to wrap a large nlohmann document once
-  // and then navigate it through cheap handles.
+  // 零拷贝视图：`owner` 保持文档存活，`node` 必须指向其中的一个
+  // 节点（或根节点）。内部用它在不复制的情况下交出成员与
+  // 元素；也便于一次性包装一份大型 nlohmann 文档，
+  // 之后通过开销很小的句柄遍历它。
   JsonValue(std::shared_ptr<const Raw> owner, const Raw* node)
       : owner_(std::move(owner)), node_(node) {}
 
@@ -253,12 +253,12 @@ class JsonValue {
   static JsonValue array(Array value);
   static JsonValue object(Object value);
 
-  // Parses strict JSON with nlohmann's parser; malformed input raises
-  // JsonParseError (wrapping nlohmann::json::parse_error).
+  // 用 nlohmann 的解析器解析严格 JSON；格式错误的输入会抛出
+  // JsonParseError（包装 nlohmann::json::parse_error）。
   static JsonValue parse(std::string_view text);
 
-  // The nlohmann node this handle refers to, for applications that want to work
-  // with nlohmann/json directly.
+  // 该句柄所指的 nlohmann 节点，供想直接使用
+  // nlohmann/json 的应用使用。
   const Raw& raw() const { return *node_; }
 
   Type type() const;
@@ -269,8 +269,8 @@ class JsonValue {
   bool isArray() const { return type() == Type::Array; }
   bool isObject() const { return type() == Type::Object; }
 
-  // Typed accessors; each throws std::runtime_error when the value has the
-  // wrong type (Gson would throw ClassCastException / IllegalStateException).
+  // 类型化访问器；当值的类型不对时，各自抛出 std::runtime_error
+  // （Gson 会抛出 ClassCastException / IllegalStateException）。
   bool asBoolean() const;
   Number asNumber() const;
   const std::string& asString() const;
@@ -279,8 +279,8 @@ class JsonValue {
 
   size_t size() const { return node_->size(); }
 
-  // Object lookup.  `find` yields an explicit JSON null member; `get` treats it
-  // as absent, which is what JsonOps' MapLike does.
+  // 对象查找。`find` 会给出显式为 JSON null 的成员；`get` 则把它
+  // 视为缺失，这也正是 JsonOps 的 MapLike 的做法。
   std::optional<JsonValue> find(std::string_view key) const;
   std::optional<JsonValue> get(std::string_view key) const;
   bool contains(std::string_view key) const { return find(key).has_value(); }
@@ -288,10 +288,10 @@ class JsonValue {
   std::string dump(bool pretty = false, int indent = 2) const;
   std::string typeName() const { return std::string(node_->type_name()); }
 
-  // Deep equality.  Objects compare order-insensitively and numbers compare like
-  // Gson's JsonPrimitive (42 == 42.0).
+  // 深度相等。对象比较不区分顺序，数值比较则与
+  // Gson 的 JsonPrimitive 一致（42 == 42.0）。
   bool equals(const JsonValue& other) const;
-  // Deep equality that also requires identical member order.
+  // 深度相等，但还要求成员顺序完全一致。
   bool equalsOrdered(const JsonValue& other) const;
   bool operator==(const JsonValue& other) const { return equals(other); }
   bool operator!=(const JsonValue& other) const { return !equals(other); }
@@ -347,8 +347,8 @@ inline JsonValue JsonValue::array(Array value) {
 inline JsonValue JsonValue::object(Object value) {
   Raw raw = Raw::object();
   for (const auto& member : value) {
-    // nlohmann's ordered object replaces an existing member in place, matching
-    // Gson's LinkedTreeMap-backed JsonObject#add.
+    // nlohmann 的有序对象会就地替换已存在的成员，与
+    // Gson 由 LinkedTreeMap 支撑的 JsonObject#add 一致。
     raw[member.first] = member.second.raw();
   }
   return JsonValue(std::move(raw));
@@ -372,8 +372,8 @@ inline JsonValue::Type JsonValue::type() const {
     case Raw::value_t::object:
       return Type::Object;
     case Raw::value_t::binary:
-      // nlohmann's binary values are not part of the JSON data model the codecs
-      // operate on; they are reported as null.
+      // nlohmann 的 binary 值不属于 codec 所操作的 JSON 数据
+      // 模型；它们会被报告为 null。
       return Type::Null;
   }
   return Type::Null;
@@ -414,7 +414,7 @@ inline JsonValue::Array JsonValue::asArray() const {
   if (!isArray()) {
     throw std::runtime_error("JsonValue is not an array: " + dump());
   }
-  // Handles share this document, so no node is copied.
+  // 各句柄共享这份文档，因此不会复制任何节点。
   Array out;
   out.reserve(node_->size());
   for (const Raw& element : *node_) {
@@ -486,7 +486,7 @@ inline bool JsonValue::equals(const JsonValue& other) const {
       return true;
     }
     case Type::Object: {
-      // Order-insensitive, like Gson's JsonObject (LinkedTreeMap) equality.
+      // 不区分顺序，与 Gson 的 JsonObject（LinkedTreeMap）相等性一致。
       if (size() != other.size()) {
         return false;
       }
@@ -560,17 +560,17 @@ inline std::ostream& operator<<(std::ostream& os, const JsonValue& value) {
 // 2/8  lifecycle.hpp -- Lifecycle
 // ===========================================================================
 
-// A C++17 port of Mojang's DataFixerUpper `com.mojang.serialization` Codec API.
+// Mojang DataFixerUpper `com.mojang.serialization` Codec API 的 C++17 移植。
 //
-// lifecycle.hpp -- port of com.mojang.serialization.Lifecycle.
+// lifecycle.hpp -- com.mojang.serialization.Lifecycle 的移植。
 
 
 namespace codec {
 
-// Lifecycle tracks whether a (de)serialization path touched anything that is
-// not guaranteed to stay stable forever.  It mirrors DFU's Lifecycle exactly,
-// including the "experimental wins" combination rule and the
-// "lowest `since` deprecated value wins" rule.
+// Lifecycle 记录一条（反）序列化路径是否触及了任何
+// 不保证永远稳定的东西。它精确对应 DFU 的 Lifecycle，
+// 包括「experimental 胜出」的组合规则，以及
+// 「`since` 最小的 deprecated 值胜出」规则。
 class Lifecycle {
  public:
   enum class Kind { Stable, Experimental, Deprecated };
@@ -632,29 +632,29 @@ class Lifecycle {
 
 
 // ===========================================================================
-// 3/8  data_result.hpp -- DataResult, PartialResult semantics, Unit
+// 3/8  data_result.hpp -- DataResult、PartialResult 语义、Unit
 // ===========================================================================
 
-// A C++17 port of Mojang's DataFixerUpper `com.mojang.serialization` Codec API.
+// Mojang DataFixerUpper `com.mojang.serialization` Codec API 的 C++17 移植。
 //
-// data_result.hpp -- port of com.mojang.serialization.DataResult.
+// data_result.hpp -- com.mojang.serialization.DataResult 的移植。
 //
-// DFU models a result as Either<R, PartialResult<R>>: a success carrying a
-// value, or a failure carrying a message plus (optionally) a partially decoded
-// value.  The C++ port keeps the exact same shape:
+// DFU 把结果建模为 Either<R, PartialResult<R>>：成功时携带一个值，
+// 失败时携带一条消息，外加（可选地）一个部分解码的值。
+// C++ 移植保持完全相同的形状：
 //
-//   value_   engaged  <=> Either.left  (success) or PartialResult.partialResult
-//   error_   engaged  <=> Either.right (failure)
+//   value_   engaged  <=> Either.left（成功）或 PartialResult.partialResult
+//   error_   engaged  <=> Either.right（失败）
 //
-// so `result()` is Java's `result()` (success value only), `error()` is Java's
-// `error()` (message) and `resultOrPartial()` / `getOrThrow(allowPartial, ...)`
-// return the partial value of a failed decode.
+// 因此 `result()` 就是 Java 的 `result()`（仅成功值），`error()` 就是 Java 的
+// `error()`（消息），而 `resultOrPartial()` / `getOrThrow(allowPartial, ...)`
+// 返回失败解码的部分值。
 
 
 
 namespace codec {
 
-// Java's Consumer<String> / UnaryOperator<String>.
+// Java 的 Consumer<String> / UnaryOperator<String>。
 using ErrorHandler = std::function<void(const std::string&)>;
 using StringUnaryOperator = std::function<std::string(const std::string&)>;
 
@@ -663,8 +663,8 @@ class DataResult;
 
 namespace detail {
 
-// Applicative combination shared by apply2/apply2stable/apply3 and by the
-// record codec builder; defined below DataResult.
+// apply2/apply2stable/apply3 与 record codec builder 共用的 applicative 组合；
+// 定义在 DataResult 之后。
 template <class F, class... Ts>
 auto combineAll(const Lifecycle& base, F function, const DataResult<Ts>&... results)
     -> DataResult<std::invoke_result_t<F, const Ts&...>>;
@@ -672,21 +672,21 @@ auto combineAll(const Lifecycle& base, F function, const DataResult<Ts>&... resu
 }  // namespace detail
 
 // ---------------------------------------------------------------------------
-// Error paths -- addition without a DFU counterpart
+// 错误路径 -- DFU 中没有对应实现的新增
 //
-// A DFU error message carries no location: a failure inside
-// `{"risks":[...,{"condition":{"or":[{"op":1}]}}]}` only says
-// `Not a string: 1`.  This port records the location alongside the message, so
+// DFU 的错误消息不携带位置信息：发生在
+// `{"risks":[...,{"condition":{"or":[{"op":1}]}}]}` 内部的失败只会给出
+// `Not a string: 1`。本移植把位置与消息一并记录下来，因此
 //
-//     result.message()    -> "Not a string: 1"                        (DFU text)
+//     result.message()    -> "Not a string: 1"                        （DFU 文本）
 //     result.location()   -> "risks[3].condition.or[0].op"
 //     result.describe()   -> "risks[3].condition.or[0].op: Not a string: 1"
 //
-// `message()` therefore stays byte-identical to DFU while `describe()` is the
-// diagnostic form to show users.  Segments are appended by the containers as an
-// error travels outwards (fieldOf adds the key, ListCodec adds [i], the record
-// builder adds the field name when encoding), so `path` is stored leaf-first and
-// rendered root-first.
+// 因此 `message()` 与 DFU 保持逐字节一致，而 `describe()` 是
+// 展示给用户的诊断形式。段由容器在错误向外传播时追加
+// （fieldOf 加上键，ListCodec 加上 [i]，record 构建器在编码时
+// 加上字段名），因此 `path` 按叶子优先存储、
+// 按根优先渲染。
 struct PathSegment {
   bool isIndex = false;
   int32_t position = 0;
@@ -713,13 +713,13 @@ struct PathSegment {
   bool operator!=(const PathSegment& other) const { return !(*this == other); }
 };
 
-// One failure: where it was found, DFU's message for it, and the chain of codecs
-// that handled it (leaf first, like a stack trace).  A result that failed in
-// several places holds several parts, which is what `message()` joins with "; "
-// exactly like DFU does.
+// 一次失败：它在何处被发现、DFU 为它给出的消息，以及处理过它的 codec
+// 调用链（叶子优先，类似栈回溯）。在多个位置失败的结果
+// 会持有多个部分，`message()` 正是用「; 」把它们连接起来，
+// 与 DFU 完全一致。
 struct ErrorPart {
-  std::vector<PathSegment> path;   // leaf first
-  std::vector<std::string> frames;  // leaf first: the failing codec, then its callers
+  std::vector<PathSegment> path;   // 叶子优先
+  std::vector<std::string> frames;  // 叶子优先：失败的 codec，然后是它的调用方
   std::string message;
 };
 
@@ -738,19 +738,19 @@ inline std::string renderPath(const std::vector<PathSegment>& path) {
   return out;
 }
 
-// Type-erased view over a DataResult<?>, used by RecordBuilder/ListBuilder
-// `withErrorsFrom` (which in DFU take a DataResult<?>).
+// 对 DataResult<?> 的类型擦除视图，供 RecordBuilder/ListBuilder 的
+// `withErrorsFrom` 使用（在 DFU 中它们接受 DataResult<?>）。
 class DataResultBase {
  public:
   virtual ~DataResultBase() = default;
 
   bool isSuccess() const { return errors_.empty(); }
   bool isError() const { return !errors_.empty(); }
-  // True when a value is available: either a success value or the partial value
-  // of a failure.
+  // 有值可用时为 true：要么是成功值，要么是失败的
+  // 部分值。
   bool hasValue() const { return valuePresent(); }
 
-  // DFU's message: the local messages joined with "; ", without any location.
+  // DFU 的消息：把各局部消息用「; 」连接，不含任何位置信息。
   std::string message() const {
     if (errors_.empty()) {
       throw std::logic_error("DataResult::message() called on a successful result");
@@ -765,8 +765,8 @@ class DataResultBase {
     return out;
   }
 
-  // The JSON path of the failure, e.g. `risks[3].condition.or[0].op`.  Empty when
-  // the failure has no location or when the parts failed in different places.
+  // 失败的 JSON 路径，例如 `risks[3].condition.or[0].op`。当失败
+  // 没有位置、或各部分失败的位置不同时为空。
   std::string location() const {
     if (errors_.empty() || errors_.front().path.empty()) {
       return {};
@@ -779,8 +779,8 @@ class DataResultBase {
     return renderPath(errors_.front().path);
   }
 
-  // `location: message` per part, joined with "; " -- the form to report on one
-  // line (this is what the diagnostic callbacks receive).
+  // 每个部分为 `location: message`，用「; 」连接 -- 适合在单行上报的
+  // 形式（诊断回调接收的就是这个）。
   std::string describe() const {
     std::string out;
     for (const ErrorPart& part : errors_) {
@@ -797,8 +797,8 @@ class DataResultBase {
     return out;
   }
 
-  // The full multi-line diagnostic: every failure with its location and the codec
-  // chain that produced it.
+  // 完整的多行诊断：每一次失败及其位置，以及产生它的 codec
+  // 调用链。
   //
   //   risks[3].condition.or[0].op: Not a string: 1
   //     in String
@@ -832,7 +832,7 @@ class DataResultBase {
  protected:
   virtual bool valuePresent() const = 0;
 
-  // Prepends nothing: containers append their segment with DataResult::addPath.
+  // 不在前面加任何东西：容器用 DataResult::addPath 追加自己的段。
   std::vector<ErrorPart> errors_;
   Lifecycle lifecycle_;
 };
@@ -844,7 +844,7 @@ class DataResult : public DataResultBase {
 
   DataResult() = default;
 
-  // --- factories (DataResult.success / DataResult.error) -------------------
+  // --- 工厂函数 (DataResult.success / DataResult.error) -------------------
   static DataResult success(R value, Lifecycle lifecycle = Lifecycle::experimental()) {
     DataResult result;
     result.value_ = std::move(value);
@@ -882,8 +882,8 @@ class DataResult : public DataResultBase {
     return result;
   }
 
-  // Failure carrying already-built parts (used by the record codec builder, whose
-  // fields each report their own location and frames).
+  // 携带已经构建好的部分的失败（供 record codec 构建器使用，其
+  // 各字段分别上报自己的位置与帧）。
   static DataResult errorParts(std::vector<ErrorPart> errors, std::optional<R> partial,
                                Lifecycle lifecycle) {
     DataResult result;
@@ -893,12 +893,12 @@ class DataResult : public DataResultBase {
     return result;
   }
 
-  // Attaches a location segment to every part.  Containers call this as an error
-  // travels outwards, so the innermost failure ends up with the full path.
+  // 给每个部分附加一个位置段。容器在错误向外传播时调用它，
+  // 因此最内层的失败最终带有完整路径。
   //
-  // The string_view and index overloads build the PathSegment *inside* the error
-  // branch, which keeps a successful decode (the hot path) allocation free: no
-  // key is copied unless something actually failed.
+  // string_view 与下标重载把 PathSegment 的构造放在错误分支*内部*，
+  // 从而让成功的解码（热路径）不产生分配：
+  // 只要没有真正失败，就不会复制任何键。
   DataResult addPath(PathSegment segment) const& {
     if (isSuccess()) {
       return *this;
@@ -940,10 +940,10 @@ class DataResult : public DataResultBase {
     return std::move(*this);
   }
 
-  // Attaches a codec frame to every part.  Each codec factory calls this on its
-  // failure path, so the parts end up carrying the chain of codecs that handled
-  // the value -- the "stack" of the decode, innermost first.  Like addPath, the
-  // frame string is only materialised when there is an error.
+  // 给每个部分附加一个 codec 帧。每个 codec 工厂都在自己的失败路径上
+  // 调用它，因此各部分最终携带处理过该值的 codec 调用链
+  // -- 解码的「栈」，最内层在前。与 addPath 一样，
+  // 只有在出现错误时才会真正构造帧字符串。
   DataResult addFrame(std::string_view frame) const& {
     if (isSuccess()) {
       return *this;
@@ -963,10 +963,10 @@ class DataResult : public DataResultBase {
     return std::move(*this);
   }
 
-  // --- accessors ----------------------------------------------------------
-  // Java's result(): the value of a successful result, empty otherwise.
+  // --- 访问器 ----------------------------------------------------------
+  // Java 的 result()：成功结果的值，否则为空。
   const std::optional<R>& result() const { return isError() ? kNoValue : value_; }
-  // The stored value whether the result succeeded or failed with a partial.
+  // 结果成功、或失败但带有部分值时存储的值。
   const std::optional<R>& valueOrPartial() const { return value_; }
   bool hasPartial() const { return isError() && value_.has_value(); }
 
@@ -996,7 +996,7 @@ class DataResult : public DataResultBase {
     return value_;
   }
 
-  // --- transformations ----------------------------------------------------
+  // --- 变换 ----------------------------------------------------
   template <class F>
   using MapValue = std::invoke_result_t<F, const R&>;
 
@@ -1024,7 +1024,7 @@ class DataResult : public DataResultBase {
       return second;
     }
     if (!value_) {
-      // Failure without a partial: there is no value to feed the function with.
+      // 失败且没有部分值：没有值可以喂给这个函数。
       DataResult<S> out;
       out.errors_ = errors_;
       out.lifecycle_ = lifecycle_;
@@ -1041,10 +1041,10 @@ class DataResult : public DataResultBase {
     return out;
   }
 
-  // Java's DataResult.apply2 / apply2stable / apply3 (the Applicative instance
-  // over DataResult).  The lifecycle base is the lifecycle of the pointed
-  // function; DFU uses an experimental point for apply2/apply3 and a stable one
-  // for apply2stable.
+  // Java 的 DataResult.apply2 / apply2stable / apply3（DataResult 上的
+  // Applicative 实例）。Lifecycle 基值是被指向函数的 lifecycle；
+  // DFU 为 apply2/apply3 使用 experimental 点，为 apply2stable 使用
+  // stable 点。
   template <class F, class R2>
   DataResult<std::invoke_result_t<F, const R&, const R2&>> apply2(
       F function, const DataResult<R2>& second) const {
@@ -1063,7 +1063,7 @@ class DataResult : public DataResultBase {
     return detail::combineAll(Lifecycle::experimental(), std::move(function), *this, second, third);
   }
 
-  // Only meaningful on a failed result (DFU's setPartial).
+  // 仅对失败的结果有意义（DFU 的 setPartial）。
   DataResult setPartial(R partial) const {
     DataResult out = *this;
     if (out.isError()) {
@@ -1083,9 +1083,9 @@ class DataResult : public DataResultBase {
   DataResult mapError(const StringUnaryOperator& function) const {
     DataResult out = *this;
     if (out.isError()) {
-      // DFU applies the operator to the whole message; the location and the codec
-      // frames survive when every part shared them, otherwise they are dropped
-      // (they would be misleading).
+      // DFU 会把该操作符应用在整个消息上；位置与 codec 帧在
+      // 每个部分都共享它们时会保留下来，否则会被丢弃
+      // （否则会造成误导）。
       const std::vector<PathSegment> path = sharedPath();
       const std::vector<std::string> frames = sharedFrames();
       out.errors_.clear();
@@ -1106,7 +1106,7 @@ class DataResult : public DataResultBase {
     return out;
   }
 
-  // Turns a partial failure into a success when a partial value exists.
+  // 当存在部分值时，把部分失败转成成功。
   DataResult promotePartial(const ErrorHandler& onError) const {
     if (!isError()) {
       return *this;
@@ -1124,7 +1124,7 @@ class DataResult : public DataResultBase {
  private:
   static const std::optional<R> kNoValue;
 
-  // The path shared by every part, or empty when they differ.
+  // 每个部分共享的路径，它们不同时为空。
   std::vector<PathSegment> sharedPath() const {
     if (errors_.empty() || errors_.front().path.empty()) {
       return {};
@@ -1137,7 +1137,7 @@ class DataResult : public DataResultBase {
     return errors_.front().path;
   }
 
-  // The codec frames shared by every part, or empty when they differ.
+  // 每个部分共享的 codec 帧，它们不同时为空。
   std::vector<std::string> sharedFrames() const {
     if (errors_.empty() || errors_.front().frames.empty()) {
       return {};
@@ -1161,13 +1161,13 @@ const std::optional<R> DataResult<R>::kNoValue{};
 namespace detail {
 
 // ---------------------------------------------------------------------------
-// combineAll -- DFU's Applicative.super.ap2 chain generalised to N operands:
-//   * all operands succeed -> success(f(values...))
-//   * otherwise            -> failure collecting the failed parts in operand
-//                             order (message() joins their texts with "; ",
-//                             describe() prefixes each with its location),
-//                             carrying a partial value when every operand has one
-//   * lifecycle            -> base.add(op1.lifecycle).add(op2.lifecycle)...
+// combineAll -- 把 DFU 的 Applicative.super.ap2 调用链推广到 N 个操作数：
+//   * 所有操作数都成功 -> success(f(values...))
+//   * 否则             -> 失败：按操作数顺序收集失败的部分
+//                         （message() 把它们的文本用「; 」连接，
+//                         describe() 给每个加上位置前缀），
+//                         当每个操作数都有部分值时携带一个部分值
+//   * lifecycle        -> base.add(op1.lifecycle).add(op2.lifecycle)...
 // ---------------------------------------------------------------------------
 template <class F, class... Ts>
 auto combineAll(const Lifecycle& base, F function, const DataResult<Ts>&... results)
@@ -1199,7 +1199,7 @@ auto combineAll(const Lifecycle& base, F function, const DataResult<Ts>&... resu
   return DataResult<R>::errorParts(std::move(errors), std::move(partial), lifecycle);
 }
 
-// Java's AbstractBuilder.withErrorsFrom: `builder.flatMap(b -> result.map(r -> b))`.
+// Java 的 AbstractBuilder.withErrorsFrom：`builder.flatMap(b -> result.map(r -> b))`。
 template <class S>
 DataResult<S> propagateErrors(const DataResult<S>& builder, const DataResultBase& result) {
   if (result.isSuccess()) {
@@ -1222,8 +1222,8 @@ DataResult<S> propagateErrors(const DataResult<S>& builder, const DataResultBase
 
 }  // namespace detail
 
-// `Unit` -- DFU's com.mojang.datafixers.util.Unit, the unit type used by codecs
-// that carry no information (Codec::EMPTY, list/map accumulation).
+// `Unit` -- DFU 的 com.mojang.datafixers.util.Unit，供不携带任何信息的
+// codec 使用的单元类型（Codec::EMPTY、list/map 累加）。
 struct Unit {
   bool operator==(const Unit&) const { return true; }
   bool operator!=(const Unit&) const { return false; }
@@ -1233,20 +1233,20 @@ struct Unit {
 
 
 // ===========================================================================
-// 4/8  dynamic_ops.hpp -- DynamicOps, MapLike, RecordBuilder, ListBuilder, KeyCompressor
+// 4/8  dynamic_ops.hpp -- DynamicOps、MapLike、RecordBuilder、ListBuilder、KeyCompressor
 // ===========================================================================
 
-// A C++17 port of Mojang's DataFixerUpper `com.mojang.serialization` Codec API.
+// Mojang DataFixerUpper `com.mojang.serialization` Codec API 的 C++17 移植。
 //
-// dynamic_ops.hpp -- ports of DynamicOps, MapLike, RecordBuilder, ListBuilder,
-// KeyCompressor and Compressable.
+// dynamic_ops.hpp -- DynamicOps、MapLike、RecordBuilder、ListBuilder、
+// KeyCompressor 与 Compressable 的移植。
 //
-// DFU's DynamicOps<T> is generic over the serialized value type (JsonElement,
-// NbtTag, ...).  This port uses one universal value type (JsonValue), so the
-// type parameter collapses and DynamicOps becomes an abstract class over
-// JsonValue.  JsonOps is the only concrete implementation shipped; because the
-// value type is universal, DynamicOps::convertTo is the identity here whereas in
-// DFU it would rewrite the DOM into the target ops' representation.
+// DFU 的 DynamicOps<T> 对序列化后的值类型（JsonElement、
+// NbtTag……）是泛型的。本移植只用一个统一的值类型（JsonValue），因此
+// 类型参数被消去，DynamicOps 变成面向 JsonValue 的抽象类。
+// JsonOps 是唯一随库提供的具体实现；由于值类型是统一的，
+// 这里的 DynamicOps::convertTo 是恒等变换，而在
+// DFU 中它会把 DOM 重写成目标 ops 的表示。
 
 
 
@@ -1258,8 +1258,8 @@ class KeyCompressor;
 
 using MapLikePtr = std::shared_ptr<const MapLike>;
 
-// Gson's JsonObject.add: an existing member is replaced in place (the object is
-// backed by a LinkedTreeMap), which is what DFU's JsonOps relies on.
+// Gson 的 JsonObject.add：已存在的成员会被原地替换（该对象
+// 由 LinkedTreeMap 支撑），这正是 DFU 的 JsonOps 所依赖的行为。
 inline void putJsonMember(JsonValue::Object& members, const std::string& key, const JsonValue& value) {
   for (auto& member : members) {
     if (member.first == key) {
@@ -1271,10 +1271,10 @@ inline void putJsonMember(JsonValue::Object& members, const std::string& key, co
 }
 
 // ---------------------------------------------------------------------------
-// MapLike<T> -- a read-only view over an object.
+// MapLike<T> -- 对象之上的只读视图。
 //
-// Quirk faithfully reproduced from JsonOps: `get` treats an explicit JSON null
-// as "absent", while `entries` yields null members as well.
+// 忠实复刻自 JsonOps 的怪癖：`get` 把显式的 JSON null 视为「缺失」，
+// 而 `entries` 也会产出 null 成员。
 // ---------------------------------------------------------------------------
 class MapLike {
  public:
@@ -1286,7 +1286,7 @@ class MapLike {
   virtual std::string toString() const = 0;
 };
 
-// MapLike backed by a JsonValue object (JsonOps.getMap).
+// 由 JsonValue 对象支撑的 MapLike（JsonOps.getMap）。
 class JsonObjectMapLike : public MapLike {
  public:
   explicit JsonObjectMapLike(JsonValue object) : object_(std::move(object)) {}
@@ -1299,7 +1299,7 @@ class JsonObjectMapLike : public MapLike {
   }
 
   std::optional<JsonValue> get(const std::string& key) const override {
-    // JsonValue::get already treats an explicit JSON null as "absent".
+    // JsonValue::get 已经把显式的 JSON null 视为「缺失」。
     return object_.get(key);
   }
 
@@ -1324,10 +1324,10 @@ class JsonObjectMapLike : public MapLike {
 };
 
 // ---------------------------------------------------------------------------
-// KeyCompressor<T> -- maps keys to dense indices (used when compressMaps()).
+// KeyCompressor<T> -- 把键映射为稠密下标（在 compressMaps() 时使用）。
 //
-// DFU's fastutil-backed maps return 0 for unknown keys; this port returns -1
-// and callers treat it as "absent" instead of silently reading index 0.
+// DFU 中由 fastutil 支撑的映射对未知键返回 0；本移植返回 -1，
+// 调用方把它视为「缺失」，而不是默默读取下标 0。
 // ---------------------------------------------------------------------------
 class KeyCompressor {
  public:
@@ -1352,8 +1352,8 @@ class KeyCompressor {
   std::unordered_map<std::string, int> compressByString_;
 };
 
-// MapLike used by MapDecoder::compressedDecode: a compressed list is addressed
-// by key index (DFU's anonymous MapLike in MapDecoder.compressedDecode).
+// MapDecoder::compressedDecode 使用的 MapLike：压缩列表按键
+// 下标寻址（DFU 中 MapDecoder.compressedDecode 里的匿名 MapLike）。
 class CompressedMapLike : public MapLike {
  public:
   CompressedMapLike(const KeyCompressor& compressor, std::vector<JsonValue> entries)
@@ -1429,13 +1429,13 @@ class ListBuilder {
   }
 };
 
-// Port of JsonOps.ArrayBuilder (the builder returned by JsonOps.listBuilder()).
+// JsonOps.ArrayBuilder 的移植（JsonOps.listBuilder() 返回的构建器）。
 //
-// The accumulator is held behind a shared_ptr: DFU's builders
-// (ImmutableList.Builder, JsonObject, ...) are *mutable objects* that the
-// applicative chain carries by reference, so `map`/`apply2stable` copy a pointer
-// and appending stays O(1).  Storing the container inline would instead copy the
-// whole accumulated list on every element (quadratic encoding).
+// 累加器放在 shared_ptr 之后持有：DFU 的构建器
+// （ImmutableList.Builder、JsonObject……）是*可变对象*，由
+// applicative 调用链按引用携带，因此 `map`/`apply2stable` 只复制指针，
+// 追加保持 O(1)。若把容器内联存储，则每个元素都要复制
+// 整个已累加的列表（编码复杂度呈平方级）。
 class ArrayListBuilder : public ListBuilder {
  public:
   using State = std::shared_ptr<JsonValue::Array>;
@@ -1505,7 +1505,7 @@ class RecordBuilder {
   }
 };
 
-// Port of RecordBuilder.AbstractBuilder<T, R>.
+// RecordBuilder.AbstractBuilder<T, R> 的移植。
 template <class State>
 class AbstractRecordBuilder : public RecordBuilder {
  public:
@@ -1544,7 +1544,7 @@ class AbstractRecordBuilder : public RecordBuilder {
   DataResult<State> builder_;
 };
 
-// Port of RecordBuilder.AbstractUniversalBuilder / RecordBuilder.MapBuilder.
+// RecordBuilder.AbstractUniversalBuilder / RecordBuilder.MapBuilder 的移植。
 class UniversalRecordBuilder
     : public AbstractRecordBuilder<std::shared_ptr<std::vector<std::pair<JsonValue, JsonValue>>>> {
  public:
@@ -1567,7 +1567,7 @@ class UniversalRecordBuilder
           state->emplace_back(key, element);
           return state;
         },
-        // Encode failures carry the member they came from: `severity: Unmapped E value`.
+        // 编码失败会携带其来源成员：`severity: Unmapped E value`。
         key.isString() ? value.addPath(key.asString()) : value);
     return *this;
   }
@@ -1591,7 +1591,7 @@ class UniversalRecordBuilder
   DataResult<JsonValue> buildState(const State& state, const JsonValue& prefix) override;
 };
 
-// Port of RecordBuilder.AbstractStringBuilder / JsonOps.JsonRecordBuilder.
+// RecordBuilder.AbstractStringBuilder / JsonOps.JsonRecordBuilder 的移植。
 class StringRecordBuilder
     : public AbstractRecordBuilder<std::shared_ptr<std::vector<std::pair<std::string, JsonValue>>>> {
  public:
@@ -1614,7 +1614,7 @@ class StringRecordBuilder
           putJsonMember(*state, key, element);
           return state;
         },
-        // Encode failures carry the member they came from.
+        // 编码失败会携带其来源成员。
         value.addPath(key));
     return *this;
   }
@@ -1630,7 +1630,7 @@ class StringRecordBuilder
   DataResult<JsonValue> buildState(const State& state, const JsonValue& prefix) override;
 };
 
-// Port of MapEncoder.makeCompressedBuilder's CompressedRecordBuilder.
+// MapEncoder.makeCompressedBuilder 的 CompressedRecordBuilder 的移植。
 class CompressedRecordBuilder
     : public AbstractRecordBuilder<std::shared_ptr<std::vector<std::optional<JsonValue>>>> {
  public:
@@ -1659,8 +1659,8 @@ class CompressedRecordBuilder
           assign(key, element, state);
           return state;
         },
-        // Compressed records keep the key name for diagnostics (the slot index
-        // would be meaningless to a reader).
+        // 压缩记录会保留键名以便诊断（槽位下标
+        // 对读者毫无意义）。
         key.isString() ? value.addPath(key.asString()) : value);
     return *this;
   }
@@ -1682,9 +1682,9 @@ class CompressedRecordBuilder
   DataResult<JsonValue> buildState(const State& state, const JsonValue& prefix) override;
 
  private:
-  // Java writes into a dense list sized by the compressor; an entry that is
-  // never written stays null, which is exactly what the compressed decoder
-  // reads back as "absent".
+  // Java 写入一个由压缩器确定大小的稠密列表；从未被写入的条目
+  // 保持为 null，这正是压缩解码器读回时
+  // 视为「缺失」的东西。
   void assign(const JsonValue& key, const JsonValue& value, const State& state) const {
     const int index = compressor_.compress(key);
     if (index >= 0 && static_cast<size_t>(index) < state->size()) {
@@ -1702,14 +1702,14 @@ class DynamicOps {
  public:
   virtual ~DynamicOps() = default;
 
-  // --- primitives ---------------------------------------------------------
+  // --- 基础类型 ---------------------------------------------------------
   virtual JsonValue empty() const = 0;
 
   virtual JsonValue emptyMap() const { return createMap({}); }
   virtual JsonValue emptyList() const { return createList({}); }
 
-  // In DFU this rewrites the value into the target ops' representation; the
-  // port's value type is universal, so JsonOps implements it as the identity.
+  // 在 DFU 中，这里会把值重写成目标 ops 的表示形式；
+  // 本移植的值类型是通用的，因此 JsonOps 把它实现为恒等变换。
   virtual JsonValue convertTo(const DynamicOps& outOps, const JsonValue& input) const = 0;
 
   virtual DataResult<Number> getNumberValue(const JsonValue& input) const = 0;
@@ -1736,7 +1736,7 @@ class DynamicOps {
   virtual DataResult<std::string> getStringValue(const JsonValue& input) const = 0;
   virtual JsonValue createString(const std::string& value) const = 0;
 
-  // --- list/map construction ---------------------------------------------
+  // --- 列表/映射构造 ---------------------------------------------
   virtual DataResult<JsonValue> mergeToList(const JsonValue& list, const JsonValue& value) const = 0;
 
   virtual DataResult<JsonValue> mergeToList(const JsonValue& list,
@@ -1780,7 +1780,7 @@ class DynamicOps {
     return DataResult<JsonValue>::success(value);
   }
 
-  // --- map access ---------------------------------------------------------
+  // --- 映射访问 ---------------------------------------------------------
   virtual DataResult<std::vector<std::pair<JsonValue, JsonValue>>> getMapValues(
       const JsonValue& input) const = 0;
 
@@ -1793,7 +1793,7 @@ class DynamicOps {
 
   virtual JsonValue createMap(const std::vector<std::pair<JsonValue, JsonValue>>& entries) const = 0;
 
-  // --- list access --------------------------------------------------------
+  // --- 列表访问 --------------------------------------------------------
   virtual DataResult<std::vector<JsonValue>> getStream(const JsonValue& input) const = 0;
 
   virtual DataResult<std::vector<JsonValue>> getList(const JsonValue& input) const {
@@ -1804,7 +1804,7 @@ class DynamicOps {
 
   virtual JsonValue remove(const JsonValue& input, const std::string& key) const = 0;
 
-  // --- generic access -----------------------------------------------------
+  // --- 泛型访问 -----------------------------------------------------
   virtual bool compressMaps() const { return false; }
 
   DataResult<JsonValue> get(const JsonValue& input, const std::string& key) const {
@@ -1834,11 +1834,11 @@ class DynamicOps {
     return result.result().has_value() ? *result.result() : input;
   }
 
-  // --- builders -----------------------------------------------------------
+  // --- 构建器 -----------------------------------------------------------
   virtual std::shared_ptr<ListBuilder> listBuilder() const;
   virtual std::shared_ptr<RecordBuilder> mapBuilder() const;
 
-  // --- conversion helpers -------------------------------------------------
+  // --- 转换辅助方法 -------------------------------------------------
   JsonValue convertList(const DynamicOps& outOps, const JsonValue& input) const {
     const DataResult<std::vector<JsonValue>> stream = getStream(input);
     std::vector<JsonValue> converted;
@@ -1865,7 +1865,7 @@ class DynamicOps {
 };
 
 // ---------------------------------------------------------------------------
-// Definitions that need DynamicOps to be complete
+// 需要 DynamicOps 完整定义的类外定义
 // ---------------------------------------------------------------------------
 inline RecordBuilder& RecordBuilder::add(const std::string& key, const JsonValue& value) {
   return add(ops().createString(key), value);
@@ -1876,7 +1876,7 @@ inline RecordBuilder& RecordBuilder::add(const std::string& key,
   return add(ops().createString(key), value);
 }
 
-// Port of RecordBuilder.AbstractStringBuilder#add(T key, ...).
+// 移植自 RecordBuilder.AbstractStringBuilder#add(T key, ...)。
 inline RecordBuilder& StringRecordBuilder::add(const JsonValue& key, const JsonValue& value) {
   builder_ = ops().getStringValue(key).flatMap([this, value](const std::string& k) {
     add(k, value);
@@ -1929,7 +1929,7 @@ inline DataResult<JsonValue> UniversalRecordBuilder::buildState(const State& sta
 
 inline DataResult<JsonValue> StringRecordBuilder::buildState(const State& state,
                                                              const JsonValue& prefix) {
-  // Port of JsonOps.JsonRecordBuilder#build.
+  // 移植自 JsonOps.JsonRecordBuilder#build。
   if (prefix.isNull() || prefix == ops_->empty()) {
     JsonValue::Object members;
     members.reserve(state->size());
@@ -2003,10 +2003,10 @@ inline int KeyCompressor::compress(const JsonValue& key) const {
 // 5/8  json_ops.hpp -- JsonOps (INSTANCE / COMPRESSED)
 // ===========================================================================
 
-// A C++17 port of Mojang's DataFixerUpper `com.mojang.serialization` Codec API.
+// Mojang DataFixerUpper `com.mojang.serialization` Codec API 的 C++17 移植。
 //
-// json_ops.hpp -- port of com.mojang.serialization.JsonOps (backed by the
-// JsonValue DOM instead of Gson's JsonElement).
+// json_ops.hpp -- com.mojang.serialization.JsonOps 的移植（由
+// JsonValue DOM 支撑，而非 Gson 的 JsonElement）。
 
 
 
@@ -2019,19 +2019,19 @@ class JsonOps : public DynamicOps {
 
   explicit JsonOps(bool compressed) : compressed_(compressed) {}
 
-  // Re-expose the DynamicOps overload sets that JsonOps specialises, so that
-  // `ops.getNumberValue(value, fallback)` / `ops.mergeToMap(map, mapLike)` keep
-  // working on a JsonOps instance.
+  // 重新暴露 JsonOps 特化的 DynamicOps 重载集合，使
+  // `ops.getNumberValue(value, fallback)` / `ops.mergeToMap(map, mapLike)` 在
+  // JsonOps 实例上仍能正常工作。
   using DynamicOps::getNumberValue;
   using DynamicOps::mergeToMap;
 
-  // --- primitives ---------------------------------------------------------
+  // --- 基础类型 ---------------------------------------------------------
   JsonValue empty() const override { return JsonValue::null(); }
 
   JsonValue convertTo(const DynamicOps& outOps, const JsonValue& input) const override {
     (void)outOps;
-    // The port's serialized value type is universal (it plays the role of
-    // JsonElement), so converting between ops is the identity.
+    // 移植版的序列化值类型是通用的（它扮演
+    // JsonElement 的角色），因此在各 ops 之间转换是恒等操作。
     return input;
   }
 
@@ -2082,7 +2082,7 @@ class JsonOps : public DynamicOps {
     return JsonValue::string(value);
   }
 
-  // --- list/map construction ---------------------------------------------
+  // --- list/map 构造 ---------------------------------------------
   DataResult<JsonValue> mergeToList(const JsonValue& list, const JsonValue& value) const override {
     if (!list.isArray() && !(list == empty())) {
       return DataResult<JsonValue>::error("mergeToList called with not a list: " + list.dump(), list);
@@ -2139,7 +2139,7 @@ class JsonOps : public DynamicOps {
     return DataResult<JsonValue>::success(JsonValue::object(std::move(out)));
   }
 
-  // --- map access ---------------------------------------------------------
+  // --- map 访问 ---------------------------------------------------------
   DataResult<std::vector<std::pair<JsonValue, JsonValue>>> getMapValues(
       const JsonValue& input) const override {
     if (!input.isObject()) {
@@ -2166,7 +2166,7 @@ class JsonOps : public DynamicOps {
     return JsonValue::object(std::move(out));
   }
 
-  // --- list access --------------------------------------------------------
+  // --- list 访问 --------------------------------------------------------
   DataResult<std::vector<JsonValue>> getStream(const JsonValue& input) const override {
     if (!input.isArray()) {
       return DataResult<std::vector<JsonValue>>::error("Not a json array: " + input.dump());
@@ -2195,7 +2195,7 @@ class JsonOps : public DynamicOps {
     return JsonValue::object(std::move(out));
   }
 
-  // --- behaviour ----------------------------------------------------------
+  // --- 行为 ----------------------------------------------------------
   bool compressMaps() const override { return compressed_; }
 
   std::shared_ptr<ListBuilder> listBuilder() const override {
@@ -2209,7 +2209,7 @@ class JsonOps : public DynamicOps {
   std::string toString() const { return "JSON"; }
 
  private:
-  // Java's `key.getAsString()`: strings, or numbers in compressed mode.
+  // Java 的 `key.getAsString()`：字符串，或压缩模式下的数字。
   std::optional<std::string> asKeyString(const JsonValue& key) const {
     if (key.isString()) {
       return key.asString();
@@ -2233,16 +2233,16 @@ inline const JsonOps JsonOps::COMPRESSED{true};
 // 6/8  codec.hpp -- Encoder, Decoder, MapEncoder, MapDecoder, Codec, MapCodec
 // ===========================================================================
 
-// A C++17 port of Mojang's DataFixerUpper `com.mojang.serialization` Codec API.
+// Mojang DataFixerUpper `com.mojang.serialization` Codec API 的 C++17 移植。
 //
-// codec.hpp -- ports of Encoder, Decoder, MapEncoder, MapDecoder, Codec and
-// MapCodec, including the combinator methods (xmap / flatXmap / comapFlatMap /
-// orElse / mapResult / fieldOf / optionalFieldOf / promotePartial / ...).
+// codec.hpp -- Encoder、Decoder、MapEncoder、MapDecoder、Codec 与
+// MapCodec 的移植，包括各组合子方法（xmap / flatXmap / comapFlatMap /
+// orElse / mapResult / fieldOf / optionalFieldOf / promotePartial / ...）。
 //
-// The Java interfaces are anonymous-implementation based; the C++ port keeps the
-// same composition model using std::function wrappers, which is why Codec and
-// MapCodec are copyable value types that can be stored in containers and
-// captured in lambdas.
+// Java 接口基于匿名实现；C++ 移植则用 std::function 包装保持
+// 相同的组合模型，因此 Codec 与 MapCodec
+// 是可拷贝的值类型，既能存入容器，也能
+// 被 lambda 捕获。
 
 
 
@@ -2265,7 +2265,7 @@ class RecordField;
 template <class O, class F>
 class GetterField;
 
-// DFU's Codec.ResultFunction / MapCodec.ResultFunction.
+// DFU 的 Codec.ResultFunction / MapCodec.ResultFunction。
 template <class A>
 struct CodecResultFunction {
   std::function<DataResult<std::pair<A, JsonValue>>(
@@ -2282,7 +2282,7 @@ struct MapResultFunction {
 };
 
 // ===========================================================================
-// Encoder<A>  (com.mojang.serialization.Encoder)
+// Encoder<A>（com.mojang.serialization.Encoder）
 // ===========================================================================
 template <class A>
 class Encoder {
@@ -2332,7 +2332,7 @@ class Encoder {
     });
   }
 
-  // Encoder.empty() -- the MapEncoder that writes nothing.
+  // Encoder.empty()——不写入任何内容的 MapEncoder。
   static MapEncoder<A> empty();
 
   static Encoder<A> error(std::string message) {
@@ -2346,7 +2346,7 @@ class Encoder {
 };
 
 // ===========================================================================
-// Decoder<A>  (com.mojang.serialization.Decoder)
+// Decoder<A>（com.mojang.serialization.Decoder）
 // ===========================================================================
 template <class A>
 class Decoder {
@@ -2406,7 +2406,7 @@ class Decoder {
     });
   }
 
-  // Decoder.unit -- a MapDecoder that ignores its input and yields `value`.
+  // Decoder.unit——忽略输入并产出 `value` 的 MapDecoder。
   static MapDecoder<A> unit(A value);
 
   static Decoder<A> error(std::string message) {
@@ -2420,7 +2420,7 @@ class Decoder {
 };
 
 // ===========================================================================
-// MapEncoder<A>  (com.mojang.serialization.MapEncoder)
+// MapEncoder<A>（com.mojang.serialization.MapEncoder）
 // ===========================================================================
 template <class A>
 class MapEncoder {
@@ -2441,7 +2441,7 @@ class MapEncoder {
     return keys_ ? keys_(ops) : std::vector<JsonValue>{};
   }
 
-  // MapEncoder.compressedBuilder: honours DynamicOps.compressMaps().
+  // MapEncoder.compressedBuilder：遵循 DynamicOps.compressMaps()。
   std::shared_ptr<RecordBuilder> compressedBuilder(const DynamicOps& ops) const;
 
   Encoder<A> encoder() const {
@@ -2488,7 +2488,7 @@ class MapEncoder {
         [self](const DynamicOps& ops) { return self.keys(ops); });
   }
 
-  // MapEncoder.empty() (DFU: Encoder.empty) -- writes nothing, has no keys.
+  // MapEncoder.empty()（DFU：Encoder.empty）——不写入任何内容，也没有键。
   static MapEncoder<A> empty() {
     return MapEncoder<A>(
         [](const A&, const DynamicOps&, RecordBuilder& prefix) -> RecordBuilder& {
@@ -2503,7 +2503,7 @@ class MapEncoder {
 };
 
 // ===========================================================================
-// MapDecoder<A>  (com.mojang.serialization.MapDecoder)
+// MapDecoder<A>（com.mojang.serialization.MapDecoder）
 // ===========================================================================
 template <class A>
 class MapDecoder {
@@ -2522,8 +2522,8 @@ class MapDecoder {
     return keys_ ? keys_(ops) : std::vector<JsonValue>{};
   }
 
-  // MapDecoder.compressedDecode: reads a compressed key list when the ops ask
-  // for map compression, otherwise decodes from the object view.
+  // MapDecoder.compressedDecode：当 ops 要求 map 压缩时读取压缩的键列表，
+  // 否则从对象视图解码。
   DataResult<A> compressedDecode(const DynamicOps& ops, const JsonValue& input) const {
     if (ops.compressMaps()) {
       const DataResult<std::vector<JsonValue>> listResult = ops.getList(input);
@@ -2576,7 +2576,7 @@ class MapDecoder {
         [self](const DynamicOps& ops) { return self.keys(ops); });
   }
 
-  // Decoder.unit: ignores the input, always yields `value`, has no keys.
+  // Decoder.unit：忽略输入，总是产出 `value`，没有任何键。
   static MapDecoder<A> unit(A value) {
     return MapDecoder<A>(
         [value](const DynamicOps&, const MapLike&) { return DataResult<A>::success(value); },
@@ -2589,7 +2589,7 @@ class MapDecoder {
 };
 
 // ===========================================================================
-// MapCodec<A>  (com.mojang.serialization.MapCodec)
+// MapCodec<A>（com.mojang.serialization.MapCodec）
 // ===========================================================================
 template <class A>
 class MapCodec {
@@ -2633,10 +2633,10 @@ class MapCodec {
 
   KeyCompressor compressor(const DynamicOps& ops) const { return KeyCompressor(ops, keys(ops)); }
 
-  // MapCodec.codec() -- wraps this map codec into a full Codec.
+  // MapCodec.codec()——把该 map codec 包装成一个完整的 Codec。
   Codec<A> codec() const;
 
-  // MapCodec.forGetter -- builds a getter-only record field (record_codec.hpp).
+  // MapCodec.forGetter——构建仅 getter 的 record 字段（record_codec.hpp）。
   template <class O>
   GetterField<O, A> forGetter(std::function<A(const O&)> getter) const;
 
@@ -2713,7 +2713,7 @@ class MapCodec {
     return mapResult(function);
   }
 
-  // MapCodec.unit -- decodes to `value` without reading anything.
+  // MapCodec.unit——不读取任何内容就解码为 `value`。
   static MapCodec<A> unit(A value) {
     return MapCodec<A>::of(MapEncoder<A>::empty(), MapDecoder<A>::unit(std::move(value)),
                            "UnitMapCodec");
@@ -2737,7 +2737,7 @@ class MapCodec {
 };
 
 // ===========================================================================
-// Codec<A>  (com.mojang.serialization.Codec)
+// Codec<A>（com.mojang.serialization.Codec）
 // ===========================================================================
 template <class A>
 class Codec {
@@ -2748,7 +2748,7 @@ class Codec {
   Codec(Encoder<A> encoder, Decoder<A> decoder, std::string name)
       : encoder_(std::move(encoder)), decoder_(std::move(decoder)), name_(std::move(name)) {}
 
-  // Implicit conversion from a MapCodec (DFU's MapCodec.MapCodecCodec).
+  // 从 MapCodec 隐式转换（DFU 的 MapCodec.MapCodecCodec）。
   Codec(const MapCodec<A>& mapCodec)  // NOLINT(google-explicit-constructor)
       : encoder_(mapCodec.encoder().encoder()),
         decoder_(mapCodec.decoder().decoder()),
@@ -2765,7 +2765,7 @@ class Codec {
   const Decoder<A>& decoder() const { return decoder_; }
   const std::string& name() const { return name_; }
 
-  // Non-null when this codec is backed by a MapCodec (used by dispatch).
+  // 当此 codec 由 MapCodec 支撑时非 null（供 dispatch 使用）。
   const MapCodec<A>* mapCodec() const { return mapCodec_.get(); }
 
   DataResult<std::pair<A, JsonValue>> decode(const DynamicOps& ops, const JsonValue& input) const {
@@ -2785,7 +2785,7 @@ class Codec {
     return encoder_.encodeStart(ops, input);
   }
 
-  // --- structural fields --------------------------------------------------
+  // --- 结构化字段 ---------------------------------------------------------
   MapCodec<A> fieldOf(const std::string& name) const {
     return MapCodec<A>::of(encoder_.fieldOf(name), decoder_.fieldOf(name),
                            "Field[" + name + ": " + name_ + "]");
@@ -2795,15 +2795,15 @@ class Codec {
 
   MapCodec<A> optionalFieldOf(const std::string& name, A defaultValue) const;
 
-  // Error-propagating counterparts (addition): a present-but-invalid value fails
-  // with its location instead of being dropped.
+  // 会传播错误的对应版本（新增）：存在但无效的值会连同其位置一起失败，
+  // 而不是被丢弃。
   MapCodec<std::optional<A>> optionalFieldOfStrict(const std::string& name) const;
 
   MapCodec<A> optionalFieldOfStrict(const std::string& name, A defaultValue) const;
 
   Codec<std::vector<A>> listOf() const;
 
-  // --- mapping ------------------------------------------------------------
+  // --- 映射 ---------------------------------------------------------------
   template <class S>
   Codec<S> xmap(std::function<S(const A&)> to, std::function<A(const S&)> from) const {
     return Codec<S>::of(encoder_.comap(from), decoder_.map(to), name_ + "[xmapped]");
@@ -2827,7 +2827,7 @@ class Codec {
     return Codec<S>::of(encoder_.flatComap(from), decoder_.flatMap(to), name_ + "[flatXmapped]");
   }
 
-  // --- lifecycle ----------------------------------------------------------
+  // --- 生命周期 -----------------------------------------------------------
   Codec<A> withLifecycle(const Lifecycle& lifecycle) const {
     return Codec<A>(encoder_.withLifecycle(lifecycle), decoder_.withLifecycle(lifecycle), name_);
   }
@@ -2838,7 +2838,7 @@ class Codec {
     return Codec<A>(encoder_, decoder_.promotePartial(onError), name_);
   }
 
-  // --- result handling ----------------------------------------------------
+  // --- 结果处理 -----------------------------------------------------------
   Codec<A> mapResult(const CodecResultFunction<A>& function) const {
     const Encoder<A> encoder = encoder_;
     const Decoder<A> decoder = decoder_;
@@ -2879,7 +2879,7 @@ class Codec {
     return mapResult(function);
   }
 
-  // --- dispatch (defined in codecs.hpp) -----------------------------------
+  // --- dispatch（定义于 codecs.hpp） --------------------------------------
   template <class E, class TypeFn, class CodecFn>
   Codec<E> partialDispatch(const std::string& typeKey, TypeFn type, CodecFn codec) const;
 
@@ -2899,10 +2899,10 @@ class Codec {
     return dispatchMap<E>(std::string("type"), std::move(type), std::move(codec));
   }
 
-  // Codec.unit -- a codec that encodes nothing and decodes to `value`.
+  // Codec.unit -- 一个不编码任何内容、解码为 `value` 的 codec。
   static Codec<A> unit(A value) { return MapCodec<A>::unit(std::move(value)).codec(); }
 
-  // Codec.EMPTY -- no-op map codec.
+  // Codec.EMPTY -- 空操作的 map codec。
   static Codec<Unit> empty() {
     return MapCodec<Unit>::of(MapEncoder<Unit>::empty(),
                               MapDecoder<Unit>::unit(Unit{}), "EmptyCodec")
@@ -2917,7 +2917,7 @@ class Codec {
 };
 
 // ===========================================================================
-// Out-of-line definitions
+// 类外定义
 // ===========================================================================
 template <class A>
 inline MapEncoder<A> Encoder<A>::empty() {
@@ -2946,8 +2946,8 @@ inline MapDecoder<A> Decoder<A>::fieldOf(const std::string& name) const {
       [self, name](const DynamicOps& ops, const MapLike& input) -> DataResult<A> {
         const std::optional<JsonValue> value = input.get(name);
         if (!value.has_value()) {
-          // The location is attached even here so that a missing key reads as
-          // `risks[3].severity: No key severity in MapLike[...]`.
+          // 这里也附上位置信息，这样缺失的键会读作
+          // `risks[3].severity: No key severity in MapLike[...]`。
           return DataResult<A>::error("No key " + name + " in " + input.toString()).addPath(name);
         }
         return self.parse(ops, *value).addPath(name);
@@ -2969,11 +2969,11 @@ inline Codec<A> MapCodec<A>::codec() const {
   return Codec<A>(*this);
 }
 
-// optionalField(name, codec) -- MapCodec<Optional<A>> (OptionalFieldCodec).
+// optionalField(name, codec) -- MapCodec<Optional<A>> (OptionalFieldCodec)。
 //
-// DFU behaviour, kept: a present-but-invalid value is treated as absent, so the
-// error (and its location) is dropped.  See optionalFieldStrict below when that is
-// not what you want.
+// 保留 DFU 的行为：存在但无效的值会被当作缺失，因此错误
+// （及其位置）会被丢弃。如果你想要的不是这种行为，见下面的
+// optionalFieldStrict。
 template <class A>
 MapCodec<std::optional<A>> optionalField(const std::string& name, Codec<A> elementCodec) {
   return MapCodec<std::optional<A>>::of(
@@ -2996,24 +2996,24 @@ MapCodec<std::optional<A>> optionalField(const std::string& name, Codec<A> eleme
             if (parsed.result().has_value()) {
               return DataResult<std::optional<A>>::success(std::optional<A>(*parsed.result()));
             }
-            // A present-but-invalid optional field is treated as absent.
+            // 存在但无效的可选字段会被当作缺失。
             return DataResult<std::optional<A>>::success(std::optional<A>{});
           },
           [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; }),
       "OptionalFieldCodec[" + name + ": " + elementCodec.name() + "]");
 }
 
-// optionalFieldStrict(name, codec) -- addition without a DFU counterpart.
+// optionalFieldStrict(name, codec) -- DFU 中没有对应实现的新增功能。
 //
-// Same shape as optionalField, except that a present-but-invalid value is a
-// *failure* carrying the field's location instead of being silently dropped:
+// 与 optionalField 形状相同，区别在于存在但无效的值会被视作
+// *失败*，并携带该字段的位置，而不是被静默丢弃：
 //
 //     {"severity": 1}   ->  ok            (optionalField)
 //                       ->  severity: Not a string: 1   (optionalFieldStrict)
 //
-// Use it where a malformed value must not be ignored -- validators, security
-// rules, anything that would otherwise decode "the field was dropped" as "the
-// field was fine".
+// 凡是非法值不能被忽略的地方都可以用它——校验器、安全规则，
+// 以及任何否则会把「字段被丢弃」解码成「字段没问题」的
+// 场合。
 template <class A>
 MapCodec<std::optional<A>> optionalFieldStrict(const std::string& name, Codec<A> elementCodec) {
   return MapCodec<std::optional<A>>::of(
@@ -3063,7 +3063,7 @@ inline MapCodec<A> Codec<A>::optionalFieldOf(const std::string& name, A defaultV
       }));
 }
 
-// Codec::optionalFieldOfStrict -- the error-propagating counterpart (addition).
+// Codec::optionalFieldOfStrict -- 会传播错误的对应版本（新增）。
 template <class A>
 inline MapCodec<std::optional<A>> Codec<A>::optionalFieldOfStrict(const std::string& name) const {
   return optionalFieldStrict(name, *this);
@@ -3084,14 +3084,14 @@ inline MapCodec<A> Codec<A>::optionalFieldOfStrict(const std::string& name, A de
 
 
 // ===========================================================================
-// 7/8  codecs.hpp -- primitive + composite codecs, range checks, recursive, dispatch
+// 7/8  codecs.hpp -- 基础类型 + 组合 codec、范围检查、递归、dispatch
 // ===========================================================================
 
-// A C++17 port of Mojang's DataFixerUpper `com.mojang.serialization` Codec API.
+// Mojang DataFixerUpper `com.mojang.serialization` Codec API 的 C++17 移植。
 //
-// codecs.hpp -- the primitive codecs (Codec.BOOL/INT/String/...) plus the
-// composite codecs: ListCodec, EitherCodec, PairCodec, UnboundedMapCodec,
-// KeyDispatchCodec, the range checkers and the recursive/lazy codec helper.
+// codecs.hpp -- 基础类型 codec（Codec.BOOL/INT/String/...），以及
+// 组合 codec：ListCodec、EitherCodec、PairCodec、UnboundedMapCodec、
+// KeyDispatchCodec、范围检查器，还有递归/惰性 codec 辅助工具。
 
 
 
@@ -3143,7 +3143,7 @@ class Either {
 };
 
 // ---------------------------------------------------------------------------
-// Primitive codecs -- PrimitiveCodec<A>
+// 基础类型 codec -- PrimitiveCodec<A>
 // ---------------------------------------------------------------------------
 namespace detail {
 
@@ -3223,7 +3223,7 @@ inline const Codec<std::string> String = detail::primitiveCodec<std::string>(
     [](const DynamicOps& ops, const JsonValue& input) { return ops.getStringValue(input); },
     [](const DynamicOps& ops, const std::string& value) { return ops.createString(value); });
 
-// Codec.PASSTHROUGH -- hands the raw dynamic value through unchanged.
+// Codec.PASSTHROUGH -- 把原始动态值原样透传。
 inline const Codec<JsonValue> Passthrough = Codec<JsonValue>::of(
     Encoder<JsonValue>([](const JsonValue& input, const DynamicOps& ops, const JsonValue& prefix) {
       if (prefix == ops.empty()) {
@@ -3250,13 +3250,13 @@ inline const Codec<JsonValue> Passthrough = Codec<JsonValue>::of(
 inline const Codec<Unit> Empty = Codec<Unit>::empty();
 
 // ---------------------------------------------------------------------------
-// stringEnum -- addition without a DFU counterpart
+// stringEnum -- DFU 中没有对应实现的新增功能
 //
-// Maps an enum to and from its JSON *name* through a name table, which is what
-// Minecraft does with StringRepresentable.fromEnum (that helper lives in
-// Minecraft, not in DataFixerUpper, so there is nothing to port here).  It is
-// implemented with Codec::flatXmap, so it composes like any other codec: use it
-// in fields, lists, dispatch, optional fields, ...
+// 通过一张名字表在枚举与其 JSON *名字*之间双向映射，这正是
+// Minecraft 用 StringRepresentable.fromEnum 做的事（那个辅助方法位于
+// Minecraft，不在 DataFixerUpper 中，所以这里没有什么可移植的）。它用
+// Codec::flatXmap 实现，因此像其他 codec 一样可组合：可以用于
+// 字段、列表、dispatch、可选字段……
 //
 //     enum class Severity { Low, Medium, Critical };
 //     const Codec<Severity> SeverityCodec = codecs::stringEnum<Severity>(
@@ -3265,13 +3265,13 @@ inline const Codec<Unit> Empty = Codec<Unit>::empty();
 //          {"critical", Severity::Critical}},
 //         "Severity");
 //
-// An unknown name fails with `Unknown Severity: "fatal"`, and a value that is not
-// in the table fails encoding with `Unmapped Severity value`.  `E` must be
-// equality comparable; the table is copied once and shared by both directions.
+// 未知的名字会失败并给出 `Unknown Severity: "fatal"`；不在表中的值
+// 编码时会失败并给出 `Unmapped Severity value`。`E` 必须支持
+// 判等；该表会被复制一次，并由两个方向共享。
 //
-// The other direction -- numbers, or enums serialised as numbers -- needs no
-// helper: `Int.xmap<E>(toEnum, toInt)` or `Int.flatXmap<E>(...)` when the mapping
-// can fail.  See test/unit/string_and_enum_test.cpp for all four combinations.
+// 另一个方向——数字，或以数字序列化的枚举——不需要
+// 辅助工具：`Int.xmap<E>(toEnum, toInt)`，或者在映射可能失败时用
+// `Int.flatXmap<E>(...)`。四种组合见 test/unit/string_and_enum_test.cpp。
 template <class E>
 Codec<E> stringEnum(std::vector<std::pair<std::string, E>> values, std::string name = "enum") {
   const auto table =
@@ -3308,7 +3308,7 @@ Codec<std::vector<A>> listOf(const Codec<A>& elementCodec) {
     const std::shared_ptr<ListBuilder> builder = ops.listBuilder();
     int32_t index = 0;
     for (const A& element : input) {
-      // Encode failures keep the element position too.
+      // 编码失败同样保留元素的位置。
       builder->add(elementCodec.encodeStart(ops, element).addPath(index));
       ++index;
     }
@@ -3328,7 +3328,7 @@ Codec<std::vector<A>> listOf(const Codec<A>& elementCodec) {
           DataResult<Unit> result = DataResult<Unit>::success(Unit{}, Lifecycle::stable());
           for (size_t i = 0; i < values.size(); ++i) {
             const JsonValue& value = values[i];
-            // A failing element is located by its index: `or[0]: ...`.
+            // 失败的元素用它的下标定位：`or[0]: ...`。
             const DataResult<std::pair<A, JsonValue>> element =
                 elementCodec.decode(ops, value).addPath(static_cast<int32_t>(i));
             if (element.isError()) {
@@ -3444,7 +3444,7 @@ Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec, const
           std::vector<std::pair<JsonValue, JsonValue>> failed;
           DataResult<Unit> result = DataResult<Unit>::success(Unit{}, Lifecycle::stable());
           for (const auto& entry : map->entries()) {
-            // Locate a bad entry by its key (or its position for non-string keys).
+            // 用键定位出错的条目（非字符串键则用它的位置）。
             const bool stringKey = entry.first.isString();
             const std::string_view keyText = stringKey ? entry.first.asString() : std::string_view();
             const int32_t entryIndex = static_cast<int32_t>(failed.size());
@@ -3464,8 +3464,8 @@ Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec, const
             }
             result = result.apply2stable(
                 [&](const Unit& unit, const Entry& decodedEntry) {
-                  // DFU uses ImmutableMap (which rejects duplicate keys); the
-                  // port keeps insertion order with last-wins semantics.
+                  // DFU 使用 ImmutableMap（它会拒绝重复键）；本移植
+                  // 保留插入顺序，采用后写覆盖（last-wins）语义。
                   for (Entry& existing : elements) {
                     if (existing.first == decodedEntry.first) {
                       existing.second = decodedEntry.second;
@@ -3493,7 +3493,7 @@ Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec, const
 }
 
 // ---------------------------------------------------------------------------
-// Range checkers (Codec.checkRange / intRange / floatRange / doubleRange)
+// 范围校验器（Codec.checkRange / intRange / floatRange / doubleRange）
 // ---------------------------------------------------------------------------
 inline Codec<int32_t> intRange(int32_t minInclusive, int32_t maxInclusive) {
   const auto checker = [minInclusive, maxInclusive](const int32_t& value) -> DataResult<int32_t> {
@@ -3537,11 +3537,11 @@ inline Codec<double> doubleRange(double minInclusive, double maxInclusive) {
 }
 
 // ---------------------------------------------------------------------------
-// Recursive / lazy codec
+// 递归 / 惰性 codec
 //
-// DFU expresses recursive codecs by handing a codec to a datafixer; in C++ the
-// cleanest equivalent is a supplier that is resolved on first use, which also
-// breaks the static initialisation cycle.
+// DFU 把 codec 交给 datafixer 来表达递归 codec；在 C++ 中
+// 最干净的等价物是一个首次使用时才求解的 supplier，它同时
+// 打破了静态初始化循环。
 // ---------------------------------------------------------------------------
 template <class A>
 Codec<A> recursive(std::function<Codec<A>()> supplier) {
@@ -3651,7 +3651,7 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
                                                     input.toString())
                             .addPath("value");
                       }
-                      // The payload of a compressed dispatch lives under "value".
+                      // 压缩后的 dispatch 的载荷位于 "value" 之下。
                       return codec.parse(ops, *value).addPath("value");
                     }
                     if (codec.mapCodec() != nullptr) {
@@ -3711,31 +3711,31 @@ MapCodec<E> Codec<A>::dispatchMap(const std::string& typeKey, TypeFn type, Codec
 
 
 // ===========================================================================
-// 8/8  record_codec.hpp -- RecordCodecBuilder: record<>, fieldOf, optionalFieldOf, forGetter
+// 8/8  record_codec.hpp -- RecordCodecBuilder：record<>、fieldOf、optionalFieldOf、forGetter
 // ===========================================================================
 
-// A C++17 port of Mojang's DataFixerUpper `com.mojang.serialization` Codec API.
+// Mojang DataFixerUpper com.mojang.serialization Codec API 的 C++17 移植。
 //
-// record_codec.hpp -- the port of RecordCodecBuilder: `fieldOf`,
-// `optionalFieldOf`, `forGetter`, `MapCodec::forGetter` and the variadic
-// `record<O>(...)` builder.
+// record_codec.hpp -- RecordCodecBuilder 的移植：ieldOf、
+// optionalFieldOf、orGetter、MapCodec::forGetter 以及变参的
+// ecord<O>(...) 构建器。
 //
-// DFU:
+// DFU：
 //     RecordCodecBuilder.create(instance -> instance.group(
 //             Codec.STRING.fieldOf("id").forGetter(RiskDef::id),
 //             ...)
 //         .apply(instance, RiskDef::new));
 //
-// C++17:
+// C++17：
 //     Codec<RiskDef> codec = record<RiskDef>(
 //             fieldOf("id", &RiskDef::id, codecs::String),
 //             ...);
 //
-// Two flavours of field exist, mirroring what `apply` can consume:
-//   * RecordField<O, F>  -- has a getter *and* a setter (built from a member
-//     pointer or an explicit setter); `record<O>(fields...)` constructs O by
-//     default-constructing and assigning each field.
-//   * GetterField<O, F>  -- getter only; requires the constructor form
+// 字段有两种形态，与 pply 所能接受的内容相对应：
+//   * RecordField<O, F>  -- 同时有 getter *和* setter（由成员指针或显式
+//     setter 构建）；ecord<O>(fields...) 通过默认构造 O 再逐字段赋值来构造它。
+//   * GetterField<O, F>  -- 只有 getter；需要构造器形式
+//     ecord<O>(ctor, fields...)。
 //     `record<O>(ctor, fields...)`.
 
 
@@ -3743,7 +3743,7 @@ MapCodec<E> Codec<A>::dispatchMap(const std::string& typeKey, TypeFn type, Codec
 namespace codec {
 
 // ---------------------------------------------------------------------------
-// Field types
+// 字段类型
 // ---------------------------------------------------------------------------
 template <class O, class F>
 class GetterField {
@@ -3834,25 +3834,25 @@ class FieldBuilder {
   Codec<F> codec_;
 };
 
-// fieldOf(name, codec) -- a MapCodec<F> field builder.
+// fieldOf(name, codec) -- 一个 MapCodec<F> 字段构建器。
 template <class F>
 FieldBuilder<F> fieldOf(const std::string& name, const Codec<F>& codec) {
   return FieldBuilder<F>(name, std::move(codec));
 }
 
-// fieldOf(name, member, codec) -- a settable field.
+// fieldOf(name, member, codec) -- 一个可设置字段。
 template <class O, class F>
 RecordField<O, F> fieldOf(const std::string& name, F O::*member, const Codec<F>& codec) {
   return fieldOf(name, std::move(codec)).forGetter(member);
 }
 
-// optionalFieldOf(name, codec) -- a field builder of std::optional<F>.
+// optionalFieldOf(name, codec) -- 一个 std::optional<F> 的字段构建器。
 template <class F>
 FieldBuilder<std::optional<F>> optionalFieldOf(const std::string& name, const Codec<F>& codec) {
   return FieldBuilder<std::optional<F>>(name, optionalField(name, std::move(codec)));
 }
 
-// optionalFieldOf(name, member, codec) -- member is a std::optional<F>.
+// optionalFieldOf(name, member, codec) -- member 是一个 std::optional<F>。
 template <class O, class F>
 RecordField<O, std::optional<F>> optionalFieldOf(const std::string& name,
                                                 std::optional<F> O::*member, const Codec<F>& codec) {
@@ -3862,9 +3862,9 @@ RecordField<O, std::optional<F>> optionalFieldOf(const std::string& name,
       optionalField(name, std::move(codec)));
 }
 
-// optionalFieldOf(name, member, codec, defaultValue) -- an absent member decodes
-// to `defaultValue` and a member equal to it is not encoded (DFU's
-// Codec.optionalFieldOf(String, A)).
+// optionalFieldOf(name, member, codec, defaultValue) -- 缺失的成员会解码为
+// defaultValue，而等于该值的成员不会被编码（DFU 的
+// Codec.optionalFieldOf(String, A)）。
 template <class O, class F>
 RecordField<O, F> optionalFieldOf(const std::string& name, F O::*member, const Codec<F>& codec,
                                   F defaultValue) {
@@ -3874,9 +3874,9 @@ RecordField<O, F> optionalFieldOf(const std::string& name, F O::*member, const C
       codec.optionalFieldOf(name, std::move(defaultValue)));
 }
 
-// optionalFieldOfStrict(name, member, codec) -- addition: like optionalFieldOf,
-// but a present-but-invalid value fails with its location instead of being
-// silently treated as absent.  Prefer it for validation (see optionalFieldStrict).
+// optionalFieldOfStrict(name, member, codec) -- 新增：类似 optionalFieldOf，
+// 但值存在却非法时会带着其位置失败，而不是被静默视为缺失。
+// 校验时优先使用它（见 optionalFieldStrict）。
 template <class O, class F>
 RecordField<O, std::optional<F>> optionalFieldOfStrict(const std::string& name,
                                                       std::optional<F> O::*member,
@@ -3887,8 +3887,8 @@ RecordField<O, std::optional<F>> optionalFieldOfStrict(const std::string& name,
       optionalFieldStrict(name, codec));
 }
 
-// optionalFieldOfStrict(name, member, codec, defaultValue) -- addition: an absent
-// member decodes to `defaultValue`, but a present-but-invalid one is an error.
+// optionalFieldOfStrict(name, member, codec, defaultValue) -- 新增：缺失的
+// 成员会解码为 defaultValue，但值存在却非法则是一个错误。
 template <class O, class F>
 RecordField<O, F> optionalFieldOfStrict(const std::string& name, F O::*member,
                                        const Codec<F>& codec, F defaultValue) {
@@ -3898,7 +3898,7 @@ RecordField<O, F> optionalFieldOfStrict(const std::string& name, F O::*member,
       codec.optionalFieldOfStrict(name, std::move(defaultValue)));
 }
 
-// MapCodec.forGetter -- DFU's `mapCodec.forGetter(getter)`.
+// MapCodec.forGetter -- DFU 的 mapCodec.forGetter(getter)。
 template <class A>
 template <class O>
 inline GetterField<O, A> MapCodec<A>::forGetter(std::function<A(const O&)> getter) const {
@@ -3987,7 +3987,7 @@ std::string joinFieldNames(const FieldsTuple& fields, std::index_sequence<I...>)
   return out;
 }
 
-// Encodes every field into the same RecordBuilder, in declaration order.
+// 把每个字段按声明顺序编码进同一个 RecordBuilder。
 template <class O, class FieldsTuple, std::size_t... I>
 RecordBuilder& encodeFields(const FieldsTuple& fields, const O& input, const DynamicOps& ops,
                             RecordBuilder& prefix, std::index_sequence<I...>) {
@@ -3998,9 +3998,9 @@ RecordBuilder& encodeFields(const FieldsTuple& fields, const O& input, const Dyn
 
 }  // namespace detail
 
-// record<O>(fields...) -- all fields must be settable, O must be default
-// constructible (DFU: RecordCodecBuilder.create(instance -> instance.group(...)
-// .apply(instance, O::new))).
+// record<O>(fields...) -- 所有字段都必须可设置，O 必须可默认
+// 构造（DFU：RecordCodecBuilder.create(instance -> instance.group(...)
+// .apply(instance, O::new))）。
 template <class O, class... Fields,
           class = std::enable_if_t<(is_record_field<Fields>::value && ...)>,
           class = std::enable_if_t<(std::is_same<typename Fields::object_type, O>::value && ...)>>
@@ -4059,8 +4059,8 @@ MapCodec<O> record(Fields... fields) {
   return MapCodec<O>::of(std::move(encoder), std::move(decoder), codecName);
 }
 
-// record<O>(constructor, fields...) -- the DFU `apply(instance, ctor)` form; use
-// it for types without a default constructor or with getter-only fields.
+// record<O>(constructor, fields...) -- DFU 的 `apply(instance, ctor)` 形式；当类型
+// 没有默认构造函数、或字段只有 getter 时使用它。
 template <class O, class Ctor, class... Fields,
           class = std::enable_if_t<(is_field<Fields>::value && ...)>,
           class = std::enable_if_t<(std::is_same<typename Fields::object_type, O>::value && ...)>,
@@ -4114,8 +4114,8 @@ MapCodec<O> record(Ctor ctor, Fields... fields) {
   return MapCodec<O>::of(std::move(encoder), std::move(decoder), codecName);
 }
 
-// recordCodec<O>(...) -- the same builders, but returning a Codec directly
-// (DFU's RecordCodecBuilder.create).
+// recordCodec<O>(...) -- 相同的构建器，但直接返回一个 Codec
+// （DFU 的 RecordCodecBuilder.create）。
 template <class O, class... Args>
 Codec<O> recordCodec(Args&&... args) {
   return record<O>(std::forward<Args>(args)...).codec();

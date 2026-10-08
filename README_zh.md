@@ -12,6 +12,7 @@
 不纳入版本管理——脚本的作用是让本次移植的来源可复现。
 
 * 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 4 100 行，CMake `INTERFACE` 目标，无需编译任何源文件
+* 头文件内的注释为**中文**；API 名、错误消息、测试名与两份 README 保持中英各自原本的语言
 * 分层测试：[`test/unit/`](test/unit)（142 个用例）、[`test/smoke/`](test/smoke)
   （23 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
   性能对比）——每层一个独立可执行文件
