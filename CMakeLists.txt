@@ -19,8 +19,6 @@ option(CODEC_BUILD_EXAMPLES "Build the example programs" ON)
 option(CODEC_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(CODEC_RECORD_STACKTRACE
   "Capture a std::stacktrace for every error (needs C++23; file:line needs debug info)" OFF)
-option(CODEC_BUILD_PROTOTYPE
-  "Build the generic-ops design prototype (experiment, not part of the library)" OFF)
 option(CODEC_BUILD_JSON
   "Build the JSON entry header (include/codec_json.hpp) and the JSON test layers; needs third_party/nlohmann/json.hpp" ON)
 option(CODEC_BUILD_TOML
@@ -146,12 +144,4 @@ if(CODEC_BUILD_EXAMPLES)
   else()
     message(STATUS "Examples need the JSON layer; skipping (CODEC_BUILD_JSON=OFF)")
   endif()
-endif()
-
-# ---------------------------------------------------------------------------
-# Design prototypes (off by default; they are experiments, not the library).
-#   prototype/ -- generic-ops (DynamicOps<T>) feasibility + microbenchmarks
-# ---------------------------------------------------------------------------
-if(CODEC_BUILD_PROTOTYPE)
-  add_subdirectory(prototype)
 endif()

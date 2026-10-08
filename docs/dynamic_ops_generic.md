@@ -1,15 +1,15 @@
 # 泛化 ops（方案 B）设计记录
 
 状态：**阶段 0（可行性 + 微基准）、阶段 1（ops 层 + codec 层擦除）、阶段 2（`Dynamic`）、
-阶段 3（第二种格式：TOML）、阶段 5（把 JSON 层从核切出去）均已完成**。门禁实测：
+阶段 3（第二种格式：TOML）、阶段 4（把 JSON 层从核切出去 + 收尾）均已完成**。门禁实测：
 阶段 1 绝对性能与改动前持平（2 风险 codec 解码 15 423 ns vs 基线 15 500 ns）；阶段 3 的
 复测见 §4.3（隔离解码指标在**代码布局噪声**内，`unboundedMap` 成功路径的多余分配已修掉），
 验收后按 §4.4 修掉了 TOML 编码的 O(N²)（400 项 248 ms → 4.2 ms，线性）。
-阶段 5 之后：核 `codec.hpp` 里 `JsonValue`/`nlohmann` 各 **0** 次命中，
+阶段 4 之后：核 `codec.hpp` 里 `JsonValue`/`nlohmann` 各 **0** 次命中，
 **没有 nlohmann 也能构建运行**（见 §4.6）——203/203 在 Release（MSVC 14.50）与
 Debug（MSVC 14.44）下全绿，无 JSON 配置 18/18，TOML=OFF 配置 181/181。
-分支：`generic-ops`（`zh-cn` 未受影响）。原型代码在 [`prototype/`](../prototype)：
-**设计实验，不是库的一部分**，且仍 include 旧核（见 §4.6 末）；阶段 4 收尾时连同它一起删除。
+分支：`generic-ops`（`zh-cn` 未受影响）。阶段 0 的原型已在阶段 4 删除；它的实测结论
+完整保留在 §4，代码本身可从提交 `6b5d523` 取回。
 
 ## 1. 目标
 
@@ -99,7 +99,8 @@ JSON 的 `null` 映射为目标 ops 的 `empty()`：`convertTo` 保持 DFU 的�
 
 ## 4. 阶段 0：原型与实测
 
-原型（`prototype/generic_ops.hpp` + `poc_main.cpp`，两个可执行文件）做了四件事：
+阶段 0 的原型（`prototype/generic_ops.hpp` + `poc_main.cpp`，两个可执行文件；已在阶段 4
+删除，代码见提交 `6b5d523`）做了四件事：
 
 1. 用**真实的 `codec::JsonValue`** 做 JSON DOM，写两条完全等价的取值路径：
    A = ops 直接收发 `JsonValue`（今天的形态），B = ops 收发擦除句柄；
@@ -309,7 +310,7 @@ TOML 之所以没暴露它，只是因为 `TomlOps` 恰好覆写了 `mapBuilder`
 **该用例已用临时改回旧实现的方式验证过**：旧实现下 `location()` 为空、`describe()` 丢掉
 `severity: ` 前缀，用例变红；改回新实现后通过——即这条用例真的能抓住这类回归。
 
-### 4.6 阶段 5：把 JSON 层从核里切出去
+### 4.6 阶段 4：把 JSON 层从核里切出去
 
 目标：**核 `codec.hpp` 只放擦除值 + ops 接口 + codec 层**，JSON 进 `codec_json.hpp`、
 TOML 留在 `codec_toml.hpp`，做到"没有 nlohmann 也能构建运行"。
@@ -347,9 +348,8 @@ CMake 侧：`option(CODEC_BUILD_JSON)`；核目标 `codec` 只带 `include/`，n
 | `CODEC_BUILD_TOML=OFF` | 0 warning、**181/181** |
 | 断言审计 `node build/phase1/assert_audit.js` | `NO ASSERTION WAS WEAKENED OR REMOVED`（审计脚本增加了 `jsonView(X) → X`、`jsonView(*X).y → X->y` 的归一化，否则 41 条"只是改了写法"的断言会被误报为缺失） |
 
-**已知遗留**：`prototype/generic_ops.hpp`（`CODEC_BUILD_PROTOTYPE=ON`，默认关）仍 include
-核并使用 JSON 类型，因此在这个配置下不再能编译。它本来就是"阶段 4 收尾时删除"的实验产物，
-按要求没有改动它；把它删掉或改成 include `codec_json.hpp` 都只是一行的事。
+**原型已删除**：`prototype/` 与 `CODEC_BUILD_PROTOTYPE` 选项在阶段 4 一起移除（它还是
+只认识旧核的实验产物）；§4 的实测数字是它的结论，代码可从提交 `6b5d523` 取回。
 
 ## 5. 阶段（每阶段门禁：全绿 + perf 复测）
 
@@ -366,8 +366,8 @@ CMake 侧：`option(CODEC_BUILD_JSON)`；核目标 `codec` 只带 `include/`，n
 | 1 | 4–5 段 + 6–8 段改签名；`JsonOps` 装箱/拆箱；`JsonValue` 公开 API 不变 | 174 + perf ≤5 % | **完成**（174/174；绝对性能持平，见 §4.2） |
 | 2 | `Passthrough` → `Codec<Dynamic>`；`models/risk_def.hpp` 的 `value` 成员跟进；`Dynamic` 类型落地 | 全绿 | **完成**（181/181；`Passthrough` 严格照 `Codec.java:197-224`；新增 `test/unit/dynamic_test.cpp` 7 个用例；头文件里 `jsonView(value)` 调用点 43 → **0**） |
 | 3 | `TomlOps`（[tinytoml](https://github.com/mayah/tinytoml) v0.4，用户指定）实现 ops；「同一 codec 吃 JSON/TOML → 同结构」交叉用例；`convertTo` 变成真转换；通用代码里最后两处 JSON 假设改成 ops 级钩子；TOML 侧 mutable 构造器（修掉验收发现的 O(N²) 编码） | 新增用例 | **完成**（203/203；新增 `include/codec_toml.hpp` + 15 个 unit + 4 个 smoke + 3 个 perf 用例；`CODEC_BUILD_TOML` 可选层；`getMap` 改纯虚、新增 `isStringKey` 钩子、通用 `UniversalListBuilder`；性能见 §4.3、§4.4，另修掉通用累加器的 JSON 假设见 §4.5） |
-| 4 | 文档：格式支持矩阵、§7 性能重测、删除原型与本文档的实验章节 | — | 待做 |
-| 5 | **把 JSON 层从核切出去**：新增 `codec_json.hpp`（JsonValue / JsonOps / 构造器 / 互操作钩子），核只留 `Number` + ops 接口 + codec 层；`CODEC_BUILD_JSON` + `codec_json` 目标；`toml_ops_test` / `toml_perf_test` 做成 JSON-free；新增 `docs/adding_a_format.md` | 核里 `JsonValue`/`nlohmann` 0 命中；无 nlohmann 配置全绿 | **完成**（203/203；`codec.hpp` 5 001 → 4 017 行，`codec_json.hpp` 1 063 行；无 JSON 配置 18/18，TOML=OFF 181/181；详见 §4.6） |
+| 4 | **把 JSON 层从核切出去**：新增 `codec_json.hpp`（JsonValue / JsonOps / 构造器 / 互操作钩子），核只留 `Number` + ops 接口 + codec 层；`CODEC_BUILD_JSON` + `codec_json` 目标；`toml_ops_test` / `toml_perf_test` 做成 JSON-free；新增 `docs/adding_a_format.md` | 核里 `JsonValue`/`nlohmann` 0 命中；无 nlohmann 配置全绿 | **完成**（203/203；`codec.hpp` 5 001 → 4 017 行，`codec_json.hpp` 1 063 行；无 JSON 配置 18/18，TOML=OFF 181/181；详见 §4.6） |
+| 5 | 收尾：删除 `prototype/` 与 `CODEC_BUILD_PROTOTYPE`、验证工具收进 `scripts/`、§7 复测、复核三个配置 | 三配置全绿 + 结论可复现 | **完成**（`scripts/assert_audit.js` + `scripts/verify_no_json.ps1` 随库发布；§7 的复测结论见该节） |
 
 阶段 1 实际做出来时比原计划多做了 6–8 段（原本排在阶段 2），并顺带补了两件今天缺的东西：
 
@@ -402,11 +402,11 @@ CMake 侧：`option(CODEC_BUILD_JSON)`；核目标 `codec` 只带 `include/`，n
   `models/risk_def.hpp` 的 `std::optional<JsonValue> value` 变成了
   `std::optional<Dynamic> value`；渲染动态值请用
   `value->ops().toString(value->value())`（示例里就是这么做的，输出文本不变）。
-* **阶段 5 的破坏性变更（include 与取值写法）**：JSON 使用者现在 include
+* **阶段 4 的破坏性变更（include 与取值写法）**：JSON 使用者现在 include
   `codec_json.hpp`（或链接 `codec::json`）；`Value::asJson()` 这个成员没有了，改成自由函数
   `jsonView(value)`（`x->asJson()` → `jsonView(*x)`）。只 include `codec.hpp` 仍然可用，
   但那时没有 `JsonOps`/`JsonValue` —— 那正是"只用核 + 别的格式"的场景。
-* **阶段 5 新增**：`include/codec_json.hpp` 入口头、`codec_json` / `codec::json` 目标、
+* **阶段 4 新增**：`include/codec_json.hpp` 入口头、`codec_json` / `codec::json` 目标、
   `CODEC_BUILD_JSON` 选项、`docs/adding_a_format.md`；`codec_toml.hpp` 不再依赖 JSON。
 * **阶段 3 新增**：`include/codec_toml.hpp`（独立可选层，`CODEC_BUILD_TOML` / `codec_toml`
   目标）提供 `TomlDocument`、`parseToml`、`TomlOps::INSTANCE`、`dumpToml`；同一批 codec 可直接
@@ -428,24 +428,35 @@ CMake 侧：`option(CODEC_BUILD_JSON)`；核目标 `codec` 只带 `include/`，n
 | 跨格式误用句柄（静默 UB） | 保留 32 字节标签；`convertTo` 一律经 `outOps` 重建 |
 | 临时量生命周期 | §4.1 第 1 条写进规范；考虑让 `getMap`/`getList` 返回共享句柄而不是按值 `vector` |
 | 压缩 ops / `KeyCompressor`（NBT 风格） | 键也是 `Value`；阶段 1 后 `dynamic_ops_test` 仍全绿（97 条断言未变） |
-| 通用代码里残留 JSON 假设 | 已清零：`getMap` 纯虚 + `isStringKey` 钩子（阶段 3）、4 段散件搬走或泛化（阶段 5，§4.6），核里 `JsonValue`/`nlohmann` 0 命中 |
+| 通用代码里残留 JSON 假设 | 已清零：`getMap` 纯虚 + `isStringKey` 钩子（阶段 3）、4 段散件搬走或泛化（阶段 4，§4.6），核里 `JsonValue`/`nlohmann` 0 命中 |
 | 核被某个格式"粘住" | 已清零：核目标不带任何第三方 include 路径；`CODEC_BUILD_JSON=OFF` + 藏掉 nlohmann 的构建 18/18 全绿（§4.6） |
 | 格式入口头互相污染 | 入口头只 include `codec.hpp` + 自己的库；交叉格式走 `convertTo`，不靠 include |
 | perf 数字本身不可靠 | 阶段 3 证明"隔离解码"的 ±3 % 可能只是代码布局（§4.3）；结论以同源 A/B + 端到端指标为准，README §7 已补这条方法论 |
 | 编译时间 | 擦除方案不增加模板实例化，应基本不变（这也是不选 B1 的理由之一） |
 
-## 8. 复现
+## 8. 复现各配置
 
 ```powershell
-cmake -S . -B build-poc -G Ninja -DCMAKE_BUILD_TYPE=Release -DCODEC_BUILD_PROTOTYPE=ON
-cmake --build build-poc
-build-poc/prototype/codec_generic_ops_poc.exe          # 24 字节句柄
-build-poc/prototype/codec_generic_ops_poc_tagged.exe   # 32 字节句柄
+# 全部：核 + JSON + TOML（203 个用例）
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
+
+# 只做 JSON：关掉 TOML 层（181 个用例）
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCODEC_BUILD_TOML=OFF
+
+# 只做 TOML：关掉 JSON 层，并把 third_party/nlohmann/json.hpp 改名藏起来
+# （脚本会构建、跑 ctest，并在 finally 里还原那个头文件；期望 18/18）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify_no_json.ps1
 ```
 
-两个可执行文件代码完全相同，只有 `PROTO_TAGGED_HANDLE=0/1` 不同，用来隔离"多 8 字节"的代价。
+阶段 0 原型的微基准（两个只有 `PROTO_TAGGED_HANDLE=0/1` 不同的可执行文件）已随
+`prototype/` 删除；需要重跑时从提交 `6b5d523` 取回即可，结论已固化在 §4。
 
-## 9. 原型退役
+## 9. 收尾记录（阶段 4）
 
-阶段 1 落地后，`prototype/`、`CODEC_BUILD_PROTOTYPE` 选项和本文档的 §4 应一并删除
-（结论可并入 README 的架构章节）。
+* `prototype/`、`CODEC_BUILD_PROTOTYPE` 选项、本文档里"原型待删"的提示一并移除（结论留在 §4）。
+* 验证工具从 gitignored 的 `build/` 收进 `scripts/`：`scripts/assert_audit.js`（证明没有
+  削弱断言，可指定修订）、`scripts/verify_no_json.ps1`（无 nlohmann 的构建+测试+自动还原）。
+* 新格式的接入规范独立成 [`docs/adding_a_format.md`](adding_a_format.md)——本文档只负责
+  "为什么 ops 层是这个形状"。

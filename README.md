@@ -345,7 +345,8 @@ test/
 examples/              risk_def_main.cpp
 reference/dfu-6.0.8/   decompiled Java original (study only)
 third_party/           nlohmann/json, googletest, tinytoml
-scripts/               fetch_deps.ps1, build.ps1
+scripts/               fetch_deps.ps1, build.ps1, decompile_reference.ps1,
+                       assert_audit.js, verify_no_json.ps1, check_comments_only.js
 ```
 
 ## 3. Java → C++ mapping
@@ -742,6 +743,16 @@ The TOML perf layer is a separate executable on purpose: adding cases to
 `codec_perf_tests` would perturb the JSON numbers it has recorded (code layout alone
 is worth ~3 %, see §7) and would drag tinytoml into the core perf binary.
 
+**Claims in this README that are scripts, not prose.** Three of the assertions this
+port makes about itself are mechanical, so they ship as tools rather than as a
+promise:
+
+| script | what it proves |
+| --- | --- |
+| `node scripts/assert_audit.js [revision]` | a refactor did not weaken or delete a test assertion: it compares the `EXPECT_*`/`ASSERT_*` multisets of every changed test file against the given revision (default `HEAD`), normalising only the mechanical rewrites (`.asJson()`, `jsonView(...)`), and prints anything that disappeared |
+| `powershell -File scripts/verify_no_json.ps1` | the core needs no serialization library: it renames `third_party/nlohmann/json.hpp` away, configures with `-DCODEC_BUILD_JSON=OFF`, builds, runs ctest (18/18) and always restores the header |
+| `node scripts/check_comments_only.js a b` | a change to a source file touched comments only (used for the Chinese translation of `codec.hpp`); `scripts/check_comments_only_selftest.js` proves the checker catches identifiers, literals, preprocessor lines, statement order and code indentation |
+
 ## 7. Performance: Codec vs nlohmann/json
 
 `test/perf/codec_perf_test.cpp` measures the same work five ways and prints a
@@ -813,6 +824,13 @@ scaled down to 40 risks so the layer stays fast (~3 s); the ratios are unchanged
 > these numbers: re-measuring the same 5-run medians afterwards moved the large
 > fixture from 7.03 to 6.68 ms (codec decode), 10.43 to 9.62 ms (parse + decode) and
 > 11.24 to 10.77 ms (encode) — all inside the spread quoted above.
+>
+> **Re-measured after the JSON layer moved out of the core** (5-run medians, same
+> harness): 2 risks — parse 12 194 ns, codec decode 15 215 ns, parse + decode
+> 27 692 ns, encode 29 396 ns; 400 risks — 2.38 / 4.40 / 7.38 / 7.50 ms. The ratios
+> against that run's own parser (1.25 / 2.27 / 2.41 small, 1.85 / 3.10 / 3.15 large)
+> are at or better than the table above, and this machine's parser is ~5 % faster
+> than when the table was written, so the table stays as the conservative record.
 
 ### Conclusion
 

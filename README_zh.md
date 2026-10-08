@@ -322,7 +322,8 @@ test/
 examples/              risk_def_main.cpp
 reference/dfu-6.0.8/   反编译得到的 Java 原始代码（仅供阅读）
 third_party/           nlohmann/json、googletest、tinytoml
-scripts/               fetch_deps.ps1、build.ps1
+scripts/               fetch_deps.ps1、build.ps1、decompile_reference.ps1、
+                       assert_audit.js、verify_no_json.ps1、check_comments_only.js
 ```
 
 ## 3. Java → C++ 对照
@@ -686,6 +687,15 @@ tinytoml 依赖）：
 TOML 性能层刻意做成独立可执行文件：往 `codec_perf_tests` 里加用例会扰动它已记录的 JSON
 数字（仅代码布局就有约 3 % 的影响，见 §7），也会把 tinytoml 拖进核心性能二进制。
 
+**这份 README 里有些结论是脚本，而不是承诺。** 有三条关于本移植自身的断言是机械可验的，
+因此随库附带工具：
+
+| 脚本 | 证明什么 |
+| --- | --- |
+| `node scripts/assert_audit.js [修订]` | 一次重构没有削弱或删除任何测试断言：把每个被改测试文件的 `EXPECT_*`/`ASSERT_*` 多重集与指定修订（默认 `HEAD`）比较，只归一化机械改写（`.asJson()`、`jsonView(...)`），任何"消失的断言"都会被列出来 |
+| `powershell -File scripts/verify_no_json.ps1` | 核不需要任何序列化库：把 `third_party/nlohmann/json.hpp` 临时改名，用 `-DCODEC_BUILD_JSON=OFF` 配置、构建、跑 ctest（18/18），并在 finally 里必定还原 |
+| `node scripts/check_comments_only.js a b` | 对源文件的改动只发生在注释里（当初用来验证 `codec.hpp` 的中文化）；`scripts/check_comments_only_selftest.js` 证明这个校验器能抓住标识符、字面量、预处理行、语句顺序乃至代码缩进的变化 |
+
 ## 7. 性能：Codec 与 nlohmann/json 对比
 
 `test/perf/codec_perf_test.cpp` 用五种方式测量同样的工作并打印表格；运行
@@ -750,6 +760,12 @@ nlohmann/json 时会写出的代码：一种是手写提取，另一种是 nlohm
 > 它们并没有改变上面的数字：同样取 5 次运行中位数复测，大文档从 7.03 ms 变为 6.68 ms
 > （codec 解码）、10.43 ms 变为 9.62 ms（解析 + 解码）、11.24 ms 变为 10.77 ms（编码），
 > 全部落在上面所说的波动范围内。
+>
+> **JSON 层从核里切出之后复测**（同机、同 harness，5 次中位数）：2 风险项为 parse
+> 12 194 ns、codec 解码 15 215 ns、解析 + 解码 27 692 ns、编码 29 396 ns；400 风险项为
+> 2.38 / 4.40 / 7.38 / 7.50 ms。用当次运行的 parser 作分母算出的比值（小文档 1.25 / 2.27 /
+> 2.41，大文档 1.85 / 3.10 / 3.15）与上表持平或更好；而本机 parser 比写表时快约 5 %，
+> 所以上表保留为保守记录。
 
 ### 结论
 
