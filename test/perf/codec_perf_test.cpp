@@ -54,7 +54,7 @@ struct Measurement {
 
 int rounds() {
 #ifdef NDEBUG
-  return 5;
+  return 7;  // Release: min-of-7 keeps the large fixture stable within ~5%
 #else
   return 3;  // Debug builds are ~30x slower; keep the layer fast
 #endif
@@ -227,6 +227,117 @@ nlohmann::ordered_json buildManually(const RiskDocument& document) {
 }
 
 // ---------------------------------------------------------------------------
+// nlohmann's own JSON <-> struct mapping: what you write if you do not port the
+// Codec layer at all (no DynamicOps, no MapCodec, no DataResult -- just
+// from_json/to_json found by ADL, as nlohmann documents).  Written with
+// contains()/value() so that absent or null members behave like the codec does.
+// ---------------------------------------------------------------------------
+}  // namespace
+
+namespace risk {
+
+inline void from_json(const nlohmann::ordered_json& raw, LocalizedText& text) {
+  text.cn = raw.at("cn").get<std::string>();
+  text.en = raw.at("en").get<std::string>();
+}
+
+inline void from_json(const nlohmann::ordered_json& raw, Condition& condition) {
+  const auto optionalString = [&raw](const char* key) -> std::optional<std::string> {
+    if (!raw.contains(key) || raw.at(key).is_null()) {
+      return std::nullopt;
+    }
+    return raw.at(key).get<std::string>();
+  };
+  const auto clauseList = [&raw](const char* key) {
+    std::vector<Condition> clauses;
+    if (raw.contains(key) && !raw.at(key).is_null()) {
+      clauses = raw.at(key).get<std::vector<Condition>>();
+    }
+    return clauses;
+  };
+  condition.orClauses = clauseList("or");
+  condition.andClauses = clauseList("and");
+  condition.notClauses = clauseList("not");
+  condition.param = optionalString("param");
+  condition.op = optionalString("op");
+  if (raw.contains("value") && !raw.at("value").is_null()) {
+    condition.value = codec::JsonValue(raw.at("value"));
+  }
+  condition.listMatch = optionalString("list_match");
+}
+
+inline void from_json(const nlohmann::ordered_json& raw, RiskDef& risk) {
+  risk.id = raw.at("id").get<std::string>();
+  risk.vid = raw.at("vid").get<std::string>();
+  risk.riskType = raw.at("risk_type").get<std::string>();
+  risk.severity = raw.at("severity").get<std::string>();
+  risk.name = raw.at("name").get<LocalizedText>();
+  risk.description = raw.at("description").get<LocalizedText>();
+  risk.solution = raw.at("solution").get<LocalizedText>();
+  risk.evidence = raw.at("evidence").get<std::vector<std::string>>();
+  if (raw.contains("condition") && !raw.at("condition").is_null()) {
+    risk.condition = raw.at("condition").get<Condition>();
+  }
+}
+
+inline void from_json(const nlohmann::ordered_json& raw, RiskDocument& document) {
+  document.risks = raw.at("risks").get<std::vector<RiskDef>>();
+}
+
+inline void to_json(nlohmann::ordered_json& raw, const LocalizedText& text) {
+  raw = nlohmann::ordered_json{{"cn", text.cn}, {"en", text.en}};
+}
+
+inline void to_json(nlohmann::ordered_json& raw, const Condition& condition) {
+  raw = nlohmann::ordered_json::object();
+  if (!condition.orClauses.empty()) {
+    raw["or"] = condition.orClauses;
+  }
+  if (!condition.andClauses.empty()) {
+    raw["and"] = condition.andClauses;
+  }
+  if (!condition.notClauses.empty()) {
+    raw["not"] = condition.notClauses;
+  }
+  if (condition.param.has_value()) {
+    raw["param"] = *condition.param;
+  }
+  if (condition.op.has_value()) {
+    raw["op"] = *condition.op;
+  }
+  if (condition.value.has_value()) {
+    raw["value"] = condition.value->raw();
+  }
+  if (condition.listMatch.has_value()) {
+    raw["list_match"] = *condition.listMatch;
+  }
+}
+
+inline void to_json(nlohmann::ordered_json& raw, const RiskDef& risk) {
+  raw = nlohmann::ordered_json::object();
+  raw["id"] = risk.id;
+  raw["vid"] = risk.vid;
+  raw["risk_type"] = risk.riskType;
+  raw["severity"] = risk.severity;
+  raw["name"] = risk.name;
+  raw["description"] = risk.description;
+  raw["solution"] = risk.solution;
+  if (risk.condition.has_value()) {
+    raw["condition"] = *risk.condition;
+  }
+  raw["evidence"] = risk.evidence;
+}
+
+inline void to_json(nlohmann::ordered_json& raw, const RiskDocument& document) {
+  raw = nlohmann::ordered_json::object();
+  raw["risks"] = document.risks;
+}
+
+}  // namespace risk
+
+namespace {
+
+// ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 std::string largeDocumentText(int riskCount) {
@@ -246,11 +357,23 @@ struct Fixture {
   std::size_t risks = 0;
 };
 
+// The large fixture is scaled down in Debug: a Debug build is ~30x slower, and the
+// ratios (which are what this layer is for) are the same either way.
+int largeRiskCount() {
+#ifdef NDEBUG
+  return 400;
+#else
+  return 40;
+#endif
+}
+
 std::vector<Fixture> fixtures() {
   const std::string small = risk::kSampleRiskJson();
-  const std::string large = largeDocumentText(400);
+  const int count = largeRiskCount();
+  const std::string large = largeDocumentText(count);
   return {Fixture{"2 risks", small, small.size(), 2},
-          Fixture{"400 risks", large, large.size(), 400}};
+          Fixture{std::to_string(count) + " risks", large, large.size(),
+                  static_cast<std::size_t>(count)}};
 }
 
 Fixture smallFixture() { return fixtures()[0]; }
@@ -268,13 +391,23 @@ TEST(PerfTest, StrategiesAgreeOnTheFixture) {
   for (const Fixture& fixture : fixtures()) {
     const RiskDocument viaCodec = codecDecode(fixture.text);
     const RiskDocument viaManual = extractManually(nlohmann::ordered_json::parse(fixture.text));
+    const RiskDocument viaNlohmann = nlohmann::ordered_json::parse(fixture.text).get<RiskDocument>();
     ASSERT_EQ(viaCodec.risks.size(), fixture.risks) << fixture.name;
     EXPECT_EQ(viaCodec, viaManual) << fixture.name;
+    EXPECT_EQ(viaCodec, viaNlohmann) << fixture.name;
     EXPECT_EQ(risk::riskDocumentCodec()
                   .encodeStart(codec::JsonOps::INSTANCE, viaCodec)
                   .result()
                   ->dump(),
               buildManually(viaCodec).dump())
+        << fixture.name;
+    // nlohmann's to_json conversion must produce the same document too.
+    const nlohmann::ordered_json converted = viaCodec;
+    EXPECT_EQ(converted.dump(),
+              risk::riskDocumentCodec()
+                  .encodeStart(codec::JsonOps::INSTANCE, viaCodec)
+                  .result()
+                  ->dump())
         << fixture.name;
   }
 }
@@ -317,6 +450,11 @@ void runComparison(const Fixture& fixture) {
         measure("ordered_json::parse + manual extraction", [&] {
           g_sink += extractManually(nlohmann::ordered_json::parse(fixture.text)).risks.size();
         });
+    const Measurement parseAndNlohmannGet =
+        measure("ordered_json::parse + get<RiskDocument>()", [&] {
+          g_sink +=
+              nlohmann::ordered_json::parse(fixture.text).get<RiskDocument>().risks.size();
+        });
     const Measurement parseAndCodec = measure("JsonValue::parse + codec decode", [&] {
       g_sink += documentCodec.parse(codec::JsonOps::INSTANCE, codec::JsonValue::parse(fixture.text))
                     .result()
@@ -324,6 +462,9 @@ void runComparison(const Fixture& fixture) {
     });
     const Measurement manualOnly = measure("manual extraction (pre-parsed)", [&] {
       g_sink += extractManually(parsedOrdered).risks.size();
+    });
+    const Measurement nlohmannGetOnly = measure("get<RiskDocument>() (pre-parsed)", [&] {
+      g_sink += parsedOrdered.get<RiskDocument>().risks.size();
     });
     const Measurement codecOnly = measure("codec decode (pre-parsed)", [&] {
       g_sink += documentCodec.parse(codec::JsonOps::INSTANCE, parsedValue).result()->risks.size();
@@ -333,8 +474,10 @@ void runComparison(const Fixture& fixture) {
     printRow(plainParse, baseline);
     printRow(orderedParse, baseline);
     printRow(parseAndManual, baseline);
+    printRow(parseAndNlohmannGet, baseline);
     printRow(parseAndCodec, baseline);
     printRow(manualOnly, baseline);
+    printRow(nlohmannGetOnly, baseline);
     printRow(codecOnly, baseline);
 
     printHeader("encoding");
@@ -347,20 +490,28 @@ void runComparison(const Fixture& fixture) {
     const Measurement manualEncode = measure("manual build + dump", [&] {
       g_sink += buildManually(expected).dump().size();
     });
+    const Measurement nlohmannSetEncode = measure("to_json + dump", [&] {
+      const nlohmann::ordered_json converted = expected;
+      g_sink += converted.dump().size();
+    });
     const Measurement parseDump = measure("ordered_json::parse + dump", [&] {
       g_sink += nlohmann::ordered_json::parse(fixture.text).dump().size();
     });
     printRow(codecEncode, baseline);
     printRow(manualEncode, baseline);
+    printRow(nlohmannSetEncode, baseline);
     printRow(parseDump, baseline);
 
     std::printf("\n  decode overhead of the Codec layer over a bare ordered_json parse: %.2fx\n",
                 parseAndCodec.nanosecondsPerOp / baseline);
+    std::printf("  decode overhead of the Codec layer over get<RiskDocument>():     %.2fx\n",
+                codecOnly.nanosecondsPerOp / nlohmannGetOnly.nanosecondsPerOp);
     std::printf("  decode overhead of the Codec layer over manual extraction:       %.2fx\n",
                 codecOnly.nanosecondsPerOp / manualOnly.nanosecondsPerOp);
-    std::printf("  encode: codec %.0f ns/op vs manual %.0f ns/op (%.2fx)\n",
-                codecEncode.nanosecondsPerOp, manualEncode.nanosecondsPerOp,
-                codecEncode.nanosecondsPerOp / manualEncode.nanosecondsPerOp);
+    std::printf("  encode: codec %.0f ns/op vs to_json %.0f ns/op (%.2fx), manual %.0f ns/op\n",
+                codecEncode.nanosecondsPerOp, nlohmannSetEncode.nanosecondsPerOp,
+                codecEncode.nanosecondsPerOp / nlohmannSetEncode.nanosecondsPerOp,
+                manualEncode.nanosecondsPerOp);
     std::printf("  per-field decode cost: %.2f us/field (%zu fields)\n",
                 codecOnly.nanosecondsPerOp / 1000.0 / static_cast<double>(fixture.risks * 11),
                 static_cast<size_t>(fixture.risks * 11));

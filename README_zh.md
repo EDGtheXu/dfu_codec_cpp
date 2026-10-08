@@ -292,68 +292,127 @@ Codec<Condition> conditionCodec() {
 
 | 文件 | 关注点 |
 | --- | --- |
-| `codec_perf_test.cpp` | 手写 nlohmann 提取器/构建器，与 Codec 层在 2 风险与 400 风险文档上的计时对比；打印第 7 节的表格 |
+| `codec_perf_test.cpp` | 手写 nlohmann 提取器/构建器，外加 nlohmann 自带的 ADL 映射（`from_json` + `get<T>()`），与 Codec 层在 2 风险与 400 风险文档上的计时对比；打印第 7 节的表格 |
 
 共享辅助代码位于 `test/support/test_support.hpp`（JSON 解析，以及会把 codec 错误
 消息作为失败原因抛出的 `decode` / `encode` / `decodeError` 包装）。
 
 ## 7. 性能：Codec 与 nlohmann/json 对比
 
-`test/perf/codec_perf_test.cpp` 用四种方式测量同样的工作并打印表格；运行
+`test/perf/codec_perf_test.cpp` 用五种方式测量同样的工作并打印表格；运行
 `codec_perf_tests.exe` 或 `ctest -R perf -V` 即可复现。基线是
 `nlohmann::ordered_json::parse`——也就是本移植自身使用的解析器——因此这些数字展示的
-是 Codec 层在解析器*之上*额外付出的代价。manual（手写）一列是用 nlohmann/json 单独
-实现时会写出的代码，它刻意**不做**任何校验。
+是 Codec 层在解析器*之上*额外付出的代价。两个 manual（手写）列分别代表只使用
+nlohmann/json 时会写出的代码：一种是手写提取，另一种是 nlohmann 自带的 ADL 映射
+（`from_json` + `get<T>()`）；两者都刻意**不做**任何校验。
 
-测量环境（本机）：Windows x64、MSVC 14.50、`Release`、5 轮校准后取最优。夹具即第 4 节
-的风险定义文档。
+测量环境：Windows x64、MSVC 14.50、`Release`；每个数字都是**5 次完整运行的
+中位数**，每次运行取 7 轮校准后的最优值。夹具即第 4 节的风险定义文档。Debug 下会把
+大文档夹具缩小到 40 个风险项以保持速度（约 3 秒），比例关系不变。
 
 **2 个风险项（2 351 字节）**
 
 | 操作 | 耗时 | 相对 `ordered_json::parse` |
 | --- | ---: | ---: |
-| `nlohmann::json::parse`（无序） | 10.8 µs | 0.85× |
-| `nlohmann::ordered_json::parse` | 12.7 µs | 1.00× |
-| 解析 + 手写提取 | 14.2 µs | 1.12× |
-| **`JsonValue::parse` + codec 解码** | **29.2 µs** | **2.30×** |
-| codec 解码（已解析的 `JsonValue`） | 15.6 µs | 1.23× |
-| 手写提取（已解析） | 1.4 µs | 0.11× |
-| **codec 编码 + dump** | **30.0 µs** | **2.37×** |
-| 手写构建 + dump | 13.2 µs | 1.04× |
+| `nlohmann::json::parse`（无序） | 10.7 µs | 0.83× |
+| `nlohmann::ordered_json::parse` | 12.9 µs | 1.00× |
+| 解析 + 手写提取 | 14.4 µs | 1.12× |
+| 解析 + `get<RiskDocument>()`（nlohmann ADL 映射） | 14.9 µs | 1.16× |
+| **`JsonValue::parse` + codec 解码** | **28.6 µs** | **2.22×** |
+| 手写提取（已解析） | 1.5 µs | 0.11× |
+| `get<RiskDocument>()`（已解析） | 1.8 µs | 0.14× |
+| codec 解码（已解析的 `JsonValue`） | 15.5 µs | 1.20× |
+| **codec 编码 + dump** | **31.2 µs** | **2.43×** |
+| 手写构建 + dump | 13.8 µs | 1.07× |
+| `to_json` + dump | 12.3 µs | 0.95× |
 
 **400 个风险项（379 611 字节）**
 
 | 操作 | 耗时 | 相对 `ordered_json::parse` |
 | --- | ---: | ---: |
-| `nlohmann::ordered_json::parse` | 2.48 ms | 1.00× |
-| 解析 + 手写提取 | 3.16 ms | 1.28× |
-| **`JsonValue::parse` + codec 解码** | **7.43 ms** | **3.00×** |
-| codec 解码（已解析的 `JsonValue`） | 4.84 ms | 1.95× |
-| 手写提取（已解析） | 0.36 ms | 0.15× |
-| **codec 编码 + dump** | **8.32 ms** | **3.36×** |
-| 手写构建 + dump | 5.36 ms | 2.16× |
+| `nlohmann::ordered_json::parse` | 3.19 ms | 1.00× |
+| `nlohmann::json::parse`（无序） | 3.56 ms | 1.12×（在噪声范围内） |
+| 解析 + `get<RiskDocument>()` | 4.17 ms | 1.31× |
+| 解析 + 手写提取 | 4.98 ms | 1.56× |
+| **`JsonValue::parse` + codec 解码** | **10.43 ms** | **3.27×** |
+| `get<RiskDocument>()`（已解析） | 0.55 ms | 0.17× |
+| 手写提取（已解析） | 0.53 ms | 0.17× |
+| codec 解码（已解析的 `JsonValue`） | 7.03 ms | 2.20× |
+| **codec 编码 + dump** | **11.24 ms** | **3.53×** |
+| `to_json` + dump | 3.55 ms | 1.11× |
+| 手写构建 + dump | 3.87 ms | 1.21× |
+
+> **测量方法。** 绝对耗时随机器负载波动约 ±20 %（基线会同向波动，因此真正有意义的是
+> 比例，而比例稳定在约 ±15 % 以内）。大文档对"进程此前做了多少工作"很敏感：若只运行
+> `--gtest_filter=PerfTest.LargeDocument`，codec 解码实测约 4.8 ms 而不是约 7.0 ms。
+> 下结论前请在本地重跑；这套基准的用途是相对比较，而不是绝对断言。
 
 ### 结论
 
-1. **一次完整的「文本 → 结构体」解码，耗时是裸 nlohmann 解析的 2.3 倍（小文档）到
-   3.0 倍（大文档）。** 解析是下限且占主导，Codec 层大致让它*翻倍*。绝对值上，
-   2 个风险项的文档约 29 µs，即单核约 34 000 份/秒。
-2. **仅 Codec 层（已解析 DOM）是解析器自身耗时的 1.2–2.0 倍**，是**手写 nlohmann
-   提取器的 7–13 倍**。这个倍数换来的是手写提取器完全不做的事情：缺失/多余键检测、
-   类型检查、数值范围、能指出出错字段名的 `error()` 消息、部分结果
+1. **经 Codec 层完成一次「文本 → 结构体」解码，耗时是裸 nlohmann 解析的 2.2 倍
+   （小文档）到 3.3 倍（大文档）。** 解析是下限且占主导，Codec 层大致让它*翻倍*。
+   绝对值上，2 个风险项的文档约 29 µs，即单核约 35 000 份/秒。
+2. **仅 Codec 层（已解析 DOM）是解析器自身耗时的 1.2–2.2 倍**，是 **nlohmann 自带
+   `get<T>()` 映射的 8.5–13 倍**。这个倍数换来的是普通映射完全不做的事情：缺失/多余
+   键检测、类型检查、数值范围、能指出出错字段名的 `error()` 消息、部分结果
    （`getOrThrow(allowPartial)`）、`Lifecycle` 追踪，以及可复用的组合能力——递归
-   record、`dispatch`、`either`、压缩 map。如果需要这些，每字段 1 µs 很划算；如果
-   不需要，直接用 nlohmann 即可。
-3. **代价随字段数线性增长**：2 风险文档 0.71 µs/字段，400 风险文档 1.10 µs/字段
-   （差异来自 380 KB DOM 的缓存压力）。不存在超线性行为。
-4. **编码在小文档上是手写构建的 2.3 倍，而在大文档上只有 1.55 倍**，因为文档一大
-   `dump()` 就占主导——文档越大，Codec 层在「编码+序列化」中的占比越小。
-5. **`ordered_json` 的解析时间比普通 `json` 多约 15 %**（大文档上约 3 %）。这是插入
-   有序对象的代价，而本移植需要它来实现逐字节一致的重新编码以及 Gson 的"原地替换
-   成员"语义。
+   record、`dispatch`、`either`、压缩 map。如果需要这些，每字段约 1 µs 很划算；
+   如果不需要，直接用 nlohmann（见下文）。
+3. **代价随字段数线性增长**：2 风险文档 0.70 µs/字段，400 风险文档 1.60 µs/字段。
+   差异来自 380 KB DOM 的缓存与分配压力，而非算法问题——不存在超线性行为。
+4. **编码在小文档上是 `to_json` 的 2.5 倍、在大文档上是 3.2 倍**；其中相当一部分是
+   逐字段的构建器开销。文档越大，`dump()` 越占主导，Codec 层在「编码+序列化」中的
+   占比也随之下降。
+5. **`ordered_json` 的解析时间比普通 `json` 多约 15–20 %**（大文档上在噪声范围内）。
+   这是插入有序对象的代价，而本移植需要它来实现逐字节一致的重新编码以及 Gson 的
+   "原地替换成员"语义。
 6. **Debug 构建的绝对值约慢 30 倍**（CLion 的默认配置），但比例关系不变：解析器的
-   2.5–4.0 倍、手写路径的 6.7–8.3 倍、编码 2.5 倍。任何性能结论都应以 Release 为准，
-   Debug 只用于查找缺陷。
+   2.3–2.9 倍、手写路径 / `get<T>()` 的 6.7–8.5 倍、编码 2.7 倍，且每字段稳定在
+   24 µs。任何性能结论都应以 Release 为准，Debug 只用于查找缺陷。
+
+### 如果只需要「JSON → 结构体」，其实并不需要 Codec 层
+
+nlohmann/json 本身就能通过 ADL 把 JSON 映射到结构体，本移植也不会妨碍这条路：
+
+```cpp
+nlohmann::ordered_json raw = nlohmann::ordered_json::parse(text);
+RiskDocument document = raw.get<RiskDocument>();   // from_json 由 ADL 找到
+```
+
+这条路径在两个夹具上分别耗时 **14.9 µs / 4.17 ms**——仅为裸解析的 **1.16 倍 /
+1.31 倍**——而 Codec 层是 28.6 µs / 10.4 ms。因此对于「模式固定、无需校验」的场景，
+Codec 层付出了 2–3 倍解析代价却没有收益；此时 `get<T>()` 或手写提取才是正确的工具，
+本移植也如实呈现这一点（`perf.StrategiesAgreeOnTheFixture` 会校验四种方式产出的结构
+完全一致，因此这个比较是公平的）。
+
+**但这并不构成"不该用 nlohmann"的理由，恰恰相反：**
+
+* nlohmann 是两条路径共同支付的**解析下限**：codec 的 28.6 µs 里有 12.9 µs 就是
+  nlohmann 对同一段文本的解析。去掉 nlohmann 并不会消除这笔开销，只会把经过实战
+  检验的解析器/序列化器换成自己写的（本移植的第一版就是如此：约 450 行代码，仍然
+  必须正确处理代理对、UTF-8 校验和最短往返浮点输出）。
+* 在本移植中，nlohmann 被限制在**一个文件、一个类型**之后：
+
+  ```powershell
+  > Select-String -Path include/codec/*.hpp -Pattern nlohmann -List | Select-Object Filename
+  include\codec\json.hpp        # 唯一提到 nlohmann 的文件
+  ```
+
+  `codec.hpp`、`codecs.hpp`、`record_codec.hpp`、`dynamic_ops.hpp`、
+  `data_result.hpp`、`lifecycle.hpp` 只会看到 `JsonValue` 与 `DynamicOps`。要替换
+  DOM——或干脆去掉这个依赖改用自研实现——只需改动 `json.hpp` 与
+  `scripts/fetch_deps.ps1`，其他文件一行都不用动。
+* 中间的 DOM 也不是"用了 nlohmann"才产生的：DFU 的 `DynamicOps<T>`/`MapLike` 契约
+  本身就是**随机访问**的。`dispatch` 先读类型键，再用选中的 codec 对*同一个 map*
+  重新解码；`ListCodec` 把失败的原始元素作为部分结果返回；`unboundedMap` 消费
+  `MapLike::entries()`；压缩 map 会在位置列表之上重建一个 `MapLike`。只向前的 token
+  流无法支撑其中任何一项。想彻底避开 DOM，就得改用流式方案（SAX 或 simdjson 的
+  on-demand 直接写入结构体）——那是另一个库，而不是这个库的移植，并且会放弃 DFU 的
+  组合模型，而那正是 DFU 的价值所在。
+
+一句话：需要校验、诊断与可复用组合时保留 Codec 层；而 nlohmann 两种情况都该保留——
+它就是 JSON 层，Codec 层是它的*使用者*，而不是它的替代品。
+
 
 ### 基准测试发现了什么
 
@@ -361,8 +420,8 @@ Codec<Condition> conditionCodec() {
 
 | 问题 | 原因 | 修复 | 效果（400 风险项） |
 | --- | --- | --- | --- |
-| 每次成员访问都深拷贝 JSON 子树 | `JsonValue` 采用值语义，而 Gson 的 `JsonElement` 是**引用**类型 | `JsonValue` 改为句柄：与文档共享所有权并指向其中一个节点 | 解码 29.4 ms → 4.8 ms |
-| 编码是二次方复杂度 | 构建器在每次 `add` 时复制整个累加器，而 DFU 的 `ImmutableList.Builder`/`JsonObject` 是**按引用传递的可变对象** | 构建器状态改为指向可变累加器的 `shared_ptr` | 编码 199 ms → 8.3 ms |
+| 每次成员访问都深拷贝 JSON 子树 | `JsonValue` 采用值语义，而 Gson 的 `JsonElement` 是**引用**类型 | `JsonValue` 改为句柄：与文档共享所有权并指向其中一个节点 | 解码 29.4 ms → 约 7.0 ms（≈4 倍） |
+| 编码是二次方复杂度 | 构建器在每次 `add` 时复制整个累加器，而 DFU 的 `ImmutableList.Builder`/`JsonObject` 是**按引用传递的可变对象** | 构建器状态改为指向可变累加器的 `shared_ptr` | 编码 199 ms → 约 11.2 ms（≈18 倍） |
 
 两者都属于设计层面的正确性问题（本移植在规模上表现得不像 DFU），而不是微优化；它们
 既被原有测试覆盖，也被新增的 `perf.StrategiesAgreeOnTheFixture` 等价性检查覆盖。

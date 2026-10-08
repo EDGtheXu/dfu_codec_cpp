@@ -309,75 +309,145 @@ only assertions are that all strategies produce the same result):
 
 | File | Focus |
 | --- | --- |
-| `codec_perf_test.cpp` | hand-written nlohmann extractor/builder, timed comparison against the Codec layer for a 2-risk and a 400-risk document; prints the table described in §7 |
+| `codec_perf_test.cpp` | hand-written nlohmann extractor/builder plus nlohmann's own ADL mapping (`from_json` + `get<T>()`), timed against the Codec layer for a 2-risk and a 400-risk document; prints the table in §7 |
 
 Shared helpers live in `test/support/test_support.hpp` (JSON parsing, `decode` /
 `encode` / `decodeError` wrappers that fail the test with the codec message).
 
 ## 7. Performance: Codec vs nlohmann/json
 
-`test/perf/codec_perf_test.cpp` measures the same work four ways and prints a
+`test/perf/codec_perf_test.cpp` measures the same work five ways and prints a
 table; run `codec_perf_tests.exe` or `ctest -R perf -V` to reproduce it. The
-baseline is `nlohmann::ordered_json::parse` — the parser the port itself uses —
-so the numbers show what the Codec layer adds *on top of* the parser. The manual
-column is a hand-written nlohmann extractor/builder: what you would write with
-nlohmann/json alone. It deliberately does **no** validation.
+baseline is `nlohmann::ordered_json::parse` — the parser the port itself uses — so
+the numbers show what the Codec layer adds *on top of* the parser. The two manual
+columns are what you would write with nlohmann/json alone, either by hand or
+through nlohmann's own ADL mapping (`from_json` + `get<T>()`); neither does any
+validation.
 
-Measured on this machine (Windows x64, MSVC 14.50, `Release`, best of 5
-calibrated runs). The fixture is the risk-definition document from §4.
+Measured on this machine (Windows x64, MSVC 14.50, `Release`); every figure is the
+**median of 5 full runs**, each run reporting the best of 7 calibrated rounds. The
+fixture is the risk-definition document from §4. In Debug the large fixture is
+scaled down to 40 risks so the layer stays fast (~3 s); the ratios are unchanged.
 
 **2 risks (2 351 B)**
 
 | operation | time | vs `ordered_json::parse` |
 | --- | ---: | ---: |
-| `nlohmann::json::parse` (unordered) | 10.8 µs | 0.85× |
-| `nlohmann::ordered_json::parse` | 12.7 µs | 1.00× |
-| parse + manual extraction | 14.2 µs | 1.12× |
-| **`JsonValue::parse` + codec decode** | **29.2 µs** | **2.30×** |
-| codec decode (pre-parsed `JsonValue`) | 15.6 µs | 1.23× |
-| manual extraction (pre-parsed) | 1.4 µs | 0.11× |
-| **codec encode + dump** | **30.0 µs** | **2.37×** |
-| manual build + dump | 13.2 µs | 1.04× |
+| `nlohmann::json::parse` (unordered) | 10.7 µs | 0.83× |
+| `nlohmann::ordered_json::parse` | 12.9 µs | 1.00× |
+| parse + manual extraction | 14.4 µs | 1.12× |
+| parse + `get<RiskDocument>()` (nlohmann ADL mapping) | 14.9 µs | 1.16× |
+| **`JsonValue::parse` + codec decode** | **28.6 µs** | **2.22×** |
+| manual extraction (pre-parsed) | 1.5 µs | 0.11× |
+| `get<RiskDocument>()` (pre-parsed) | 1.8 µs | 0.14× |
+| codec decode (pre-parsed `JsonValue`) | 15.5 µs | 1.20× |
+| **codec encode + dump** | **31.2 µs** | **2.43×** |
+| manual build + dump | 13.8 µs | 1.07× |
+| `to_json` + dump | 12.3 µs | 0.95× |
 
 **400 risks (379 611 B)**
 
 | operation | time | vs `ordered_json::parse` |
 | --- | ---: | ---: |
-| `nlohmann::ordered_json::parse` | 2.48 ms | 1.00× |
-| parse + manual extraction | 3.16 ms | 1.28× |
-| **`JsonValue::parse` + codec decode** | **7.43 ms** | **3.00×** |
-| codec decode (pre-parsed `JsonValue`) | 4.84 ms | 1.95× |
-| manual extraction (pre-parsed) | 0.36 ms | 0.15× |
-| **codec encode + dump** | **8.32 ms** | **3.36×** |
-| manual build + dump | 5.36 ms | 2.16× |
+| `nlohmann::ordered_json::parse` | 3.19 ms | 1.00× |
+| `nlohmann::json::parse` (unordered) | 3.56 ms | 1.12× (within noise) |
+| parse + `get<RiskDocument>()` | 4.17 ms | 1.31× |
+| parse + manual extraction | 4.98 ms | 1.56× |
+| **`JsonValue::parse` + codec decode** | **10.43 ms** | **3.27×** |
+| `get<RiskDocument>()` (pre-parsed) | 0.55 ms | 0.17× |
+| manual extraction (pre-parsed) | 0.53 ms | 0.17× |
+| codec decode (pre-parsed `JsonValue`) | 7.03 ms | 2.20× |
+| **codec encode + dump** | **11.24 ms** | **3.53×** |
+| `to_json` + dump | 3.55 ms | 1.11× |
+| manual build + dump | 3.87 ms | 1.21× |
+
+> **Methodology.** Absolute times drift ±20 % with machine load (the baseline moves
+> with them, so the ratios are the meaningful part, and they stay within ~±15 %).
+> The large fixture is sensitive to how much work the process did before: with
+> `--gtest_filter=PerfTest.LargeDocument` alone, codec decode measures ~4.8 ms
+> instead of ~7.0 ms. Rerun locally before drawing conclusions; the harness is
+> there for relative comparisons, not for absolute claims.
 
 ### Conclusion
 
-1. **A full text → struct decode costs 2.3× (small) to 3.0× (large) a bare
-   nlohmann parse.** Parsing is the floor and dominates; the Codec layer roughly
-   *doubles* it. In absolute terms a 2-risk document decodes in ~29 µs, i.e.
-   ~34 000 documents/s on one core.
-2. **The Codec layer alone (pre-parsed DOM) is 1.2–2.0× the parser's own cost**,
-   or **7–13× a hand-written nlohmann extractor**. That factor buys everything
-   the manual extractor does not do: missing/extra key detection, type checks,
+1. **A full text → struct decode through the Codec layer costs 2.2× (small) to
+   3.3× (large) a bare nlohmann parse.** Parsing is the floor and dominates; the
+   Codec layer roughly *doubles* it. In absolute terms a 2-risk document decodes
+   in ~29 µs, i.e. ~35 000 documents/s on one core.
+2. **The Codec layer alone (pre-parsed DOM) is 1.2–2.2× the parser's own cost**,
+   or **8.5–13× nlohmann's own `get<T>()` mapping**. That factor buys everything
+   the plain mapping does not do: missing/extra key detection, type checks,
    numeric ranges, `error()` messages that name the failing field, partial
    results (`getOrThrow(allowPartial)`), `Lifecycle` tracking, and reusable
    composition — recursive records, `dispatch`, `either`, compressed maps. If
-   those matter, 1 µs per field is cheap; if they do not, use nlohmann directly.
-3. **Cost is linear in the number of fields**: 0.71 µs/field for the 2-risk
-   document and 1.10 µs/field for the 400-risk one (the difference is cache
-   pressure on a 380 KB DOM). No superlinear behaviour.
-4. **Encoding is 2.3× manual building for the small document but only 1.55× for
-   the large one**, because `dump()` dominates once the document is big — the
-   Codec layer's share of an encode+serialise shrinks with size.
-5. **`ordered_json` costs ~15 % more parse time than plain `json`** on the small
-   document (3 % on the large one). That is the price of insertion-ordered
-   objects, which the port needs for byte-identical re-encoding and for Gson's
-   "replace member in place" semantics.
+   those matter, ~1 µs per field is cheap; if they do not, use nlohmann directly
+   (see below).
+3. **Cost is linear in the number of fields**: 0.70 µs/field for the 2-risk
+   document and 1.60 µs/field for the 400-risk one. The difference is cache and
+   allocation pressure on a 380 KB DOM, not algorithmic — there is no superlinear
+   behaviour.
+4. **Encoding is 2.5× `to_json` for the small document and 3.2× for the large
+   one**; a chunk of that is the builder overhead per field, and the Codec layer's
+   *share* of an encode+serialise falls as documents grow (the `dump()` dominates
+   less than the field-by-field work).
+5. **`ordered_json` costs ~15–20 % more parse time than plain `json`** on the small
+   document (within noise on the large one). That is the price of
+   insertion-ordered objects, which the port needs for byte-identical
+   re-encoding and for Gson's "replace member in place" semantics.
 6. **Debug builds are ~30× slower in absolute terms** (CLion's default config)
-   but the ratios hold: 2.5–4.0× the parser, 6.7–8.3× the manual path, encode
-   2.5×. Use Release for any performance conclusion; Debug is only for finding
-   bugs.
+   but the ratios hold: 2.3–2.9× the parser, 6.7–8.5× the manual path / `get<T>()`,
+   encode 2.7×, and a stable 24 µs per field. Use Release for any performance
+   conclusion; Debug is only for finding bugs.
+
+### If all you need is JSON → struct, you do not need the Codec layer
+
+nlohmann/json already maps JSON onto structs through ADL, and this port does not
+stand in its way:
+
+```cpp
+nlohmann::ordered_json raw = nlohmann::ordered_json::parse(text);
+RiskDocument document = raw.get<RiskDocument>();   // from_json found by ADL
+```
+
+That path costs **14.9 µs / 4.17 ms** for the two fixtures — **1.16× / 1.31× a
+bare parse** — versus the Codec layer's 28.6 µs / 10.4 ms. So for a fixed schema
+with no validation requirements, the Codec layer is 2–3× the parse for no benefit;
+`get<T>()` or the hand-written extractor is the right tool, and the port is honest
+about that (`perf.StrategiesAgreeOnTheFixture` checks that all four strategies
+produce identical structures, so the comparison is apples to apples).
+
+**This is not an argument against nlohmann/json, though** — quite the opposite:
+
+* nlohmann is the *parse floor* both paths pay: of the codec's 28.6 µs, 12.9 µs is
+  nlohmann's parse of the same text. Dropping nlohmann would not remove that cost,
+  it would merely replace a battle-tested parser/serializer with a hand-written one
+  (the first version of this port had one: ~450 lines that still had to get
+  surrogate pairs, UTF-8 validation and shortest-round-trip float printing right).
+* In this port nlohmann is confined to **one file behind one type**:
+
+  ```powershell
+  > Select-String -Path include/codec/*.hpp -Pattern nlohmann -List | Select-Object Filename
+  include\codec\json.hpp        # the only file that mentions nlohmann
+  ```
+
+  `codec.hpp`, `codecs.hpp`, `record_codec.hpp`, `dynamic_ops.hpp`,
+  `data_result.hpp` and `lifecycle.hpp` only ever see `JsonValue` and
+  `DynamicOps`. Swapping the DOM — or removing the dependency in favour of your own
+  — touches `json.hpp` and `scripts/fetch_deps.ps1` and nothing else.
+* The intermediate DOM is not an accident of using nlohmann either: DFU's
+  `DynamicOps<T>`/`MapLike` contract is **random access**. `dispatch` reads the
+  type key and then re-decodes *the same map* with the selected codec,
+  `ListCodec` returns the raw failed elements as its partial result,
+  `unboundedMap` consumes `MapLike::entries()`, and compressed maps rebuild a
+  `MapLike` over a positional list. A forward-only token stream can serve none of
+  those. Avoiding the DOM entirely means a streaming design (SAX or simdjson
+  on-demand straight into structs) — a different library rather than a port of this
+  one, and one that gives up the composition model that is the point of DFU.
+
+In short: keep the Codec layer when you want validation, diagnostics and reusable
+composition; keep nlohmann either way, because it is the JSON layer, and the Codec
+layer is a *user* of it rather than an alternative to it.
+
 
 ### What the benchmark found
 
@@ -386,8 +456,8 @@ implementation was *less* faithful than DFU rather than merely slower:
 
 | Issue | Cause | Fix | Effect (400 risks) |
 | --- | --- | --- | --- |
-| Every member access deep-copied the JSON subtree | `JsonValue` had value semantics, but Gson's `JsonElement` is a **reference** type | `JsonValue` is now a handle: it shares ownership of the document and points at one node | decode 29.4 ms → 4.8 ms |
-| Encoding was quadratic | The builders copied their whole accumulator on every `add`, whereas DFU's `ImmutableList.Builder`/`JsonObject` are **mutable objects** carried by reference | Builder state is a `shared_ptr` to a mutable accumulator | encode 199 ms → 8.3 ms |
+| Every member access deep-copied the JSON subtree | `JsonValue` had value semantics, but Gson's `JsonElement` is a **reference** type | `JsonValue` is now a handle: it shares ownership of the document and points at one node | decode 29.4 ms → ~7.0 ms (≈4×) |
+| Encoding was quadratic | The builders copied their whole accumulator on every `add`, whereas DFU's `ImmutableList.Builder`/`JsonObject` are **mutable objects** carried by reference | Builder state is a `shared_ptr` to a mutable accumulator | encode 199 ms → ~11.2 ms (≈18×) |
 
 Both were correctness-of-design issues (the port did not behave like DFU under
 scale), not micro-optimisations, and both are covered by the existing tests plus

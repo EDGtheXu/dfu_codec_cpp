@@ -9,7 +9,7 @@
 // that objects keep their insertion order exactly like Gson's
 // LinkedTreeMap-backed JsonObject and that member assignment replaces in place.
 //
-// `JsonValue` is a thin value-semantic facade over nlohmann::ordered_json:
+// `JsonValue` is a thin reference-semantics facade over nlohmann::ordered_json:
 //   * the codec layer talks to DynamicOps/JsonValue and never to nlohmann,
 //   * applications can hand a nlohmann document straight in (JsonValue has an
 //     implicit constructor from nlohmann::ordered_json) and get it back with
