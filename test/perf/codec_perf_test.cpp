@@ -140,7 +140,8 @@ Condition extractCondition(const nlohmann::ordered_json& raw) {
     condition.op = raw.at("op").get<std::string>();
   }
   if (raw.contains("value")) {
-    condition.value = codec::JsonValue(raw.at("value"));
+    condition.value = codec::Dynamic(codec::JsonOps::INSTANCE,
+                                     codec::Value(codec::JsonValue(raw.at("value"))));
   }
   if (raw.contains("list_match")) {
     condition.listMatch = raw.at("list_match").get<std::string>();
@@ -201,7 +202,7 @@ nlohmann::ordered_json buildManually(const RiskDocument& document) {
             rawClause["op"] = *clause.op;
           }
           if (clause.value.has_value()) {
-            rawClause["value"] = clause.value->raw();
+            rawClause["value"] = clause.value->value().asJson().raw();
           }
           rawCondition["or"].push_back(rawClause);
         }
@@ -213,7 +214,7 @@ nlohmann::ordered_json buildManually(const RiskDocument& document) {
         rawCondition["op"] = *condition.op;
       }
       if (condition.value.has_value()) {
-        rawCondition["value"] = condition.value->raw();
+        rawCondition["value"] = condition.value->value().asJson().raw();
       }
       if (condition.listMatch.has_value()) {
         rawCondition["list_match"] = *condition.listMatch;
@@ -261,7 +262,8 @@ inline void from_json(const nlohmann::ordered_json& raw, Condition& condition) {
   condition.param = optionalString("param");
   condition.op = optionalString("op");
   if (raw.contains("value") && !raw.at("value").is_null()) {
-    condition.value = codec::JsonValue(raw.at("value"));
+    condition.value = codec::Dynamic(codec::JsonOps::INSTANCE,
+                                     codec::Value(codec::JsonValue(raw.at("value"))));
   }
   condition.listMatch = optionalString("list_match");
 }
@@ -306,7 +308,7 @@ inline void to_json(nlohmann::ordered_json& raw, const Condition& condition) {
     raw["op"] = *condition.op;
   }
   if (condition.value.has_value()) {
-    raw["value"] = condition.value->raw();
+    raw["value"] = condition.value->value().asJson().raw();
   }
   if (condition.listMatch.has_value()) {
     raw["list_match"] = *condition.listMatch;

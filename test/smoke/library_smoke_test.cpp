@@ -16,6 +16,7 @@ namespace {
 
 using codec::Codec;
 using codec::DataResult;
+using codec::Dynamic;
 using codec::Either;
 using codec::JsonOps;
 using codec::JsonValue;
@@ -30,6 +31,7 @@ using codec::optionalFieldOf;
 using codec::recordCodec;
 using codec::testing::decode;
 using codec::testing::encode;
+using codec::testing::dumpJson;
 using codec::testing::json;
 
 // ---------------------------------------------------------------------------
@@ -62,7 +64,7 @@ struct Payload {
   Either<int32_t, std::string> id;                           // either
   std::vector<std::pair<std::string, int32_t>> extra;        // unboundedMap
   int32_t level = 0;                                         // intRange
-  JsonValue raw;                                             // Passthrough
+  Dynamic raw{JsonOps::INSTANCE};                            // Passthrough
   Shape shape;                                               // dispatch (KeyDispatchCodec)
 
   bool operator==(const Payload& other) const {
@@ -137,7 +139,7 @@ TEST(SmokeTest, DecodesEveryCodecKind) {
   EXPECT_EQ(payload.extra.size(), 2u);
   EXPECT_EQ(payload.extra[1].first, "y");
   EXPECT_EQ(payload.level, 5);
-  EXPECT_EQ(payload.raw.dump(), R"({"any":["json",1]})");
+  EXPECT_EQ(dumpJson(payload.raw.value()), R"({"any":["json",1]})");
   EXPECT_EQ(payload.shape.kind, "circle");
   EXPECT_DOUBLE_EQ(payload.shape.radius, 1.5);
 }

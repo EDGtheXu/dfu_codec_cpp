@@ -16,7 +16,7 @@ the port's provenance can be reproduced.
 
 * Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~4 400 lines, CMake `INTERFACE` target, nothing to build
 * Comments inside the header are written in **Chinese**; API names, error messages, test names and both READMEs stay English
-* Layered tests: [`test/unit/`](test/unit) (148 cases), [`test/smoke/`](test/smoke) (23 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
+* Layered tests: [`test/unit/`](test/unit) (155 cases), [`test/smoke/`](test/smoke) (23 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -71,7 +71,7 @@ Or drive CMake directly:
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # all layers, 174 cases
+ctest --test-dir build --output-on-failure   # all layers, 181 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
 
@@ -180,6 +180,11 @@ plug into the same codecs. With `JsonOps` the payload is a `JsonValue` node, so
 2-risk codec decode measured 15 423 ns against the 15 500 ns it had before the
 change (see §7 and [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)).
 
+`codec::Dynamic` pairs a value with the ops that understands it, which is what
+`codecs::Passthrough` carries (`Codec<Dynamic>`): a raw dynamic value is meaningless
+without its ops, and only the pair can be moved between formats — `Dynamic::convertTo`
+is where `DynamicOps::convertTo` starts doing real work.
+
 ```cpp
 JsonValue value = nlohmann::ordered_json::parse(text);   // implicit conversion
 const nlohmann::ordered_json& raw = value.raw();         // back to nlohmann
@@ -238,7 +243,7 @@ scripts/               fetch_deps.ps1, build.ps1
 | `Optional<T>` | `std::optional<T>` |
 | `Pair<A, B>` | `std::pair<A, B>` |
 | `Either<L, R>` | `codec::Either<L, R>` (variant-backed) |
-| `Unit`, `PASSTHROUGH`, `EMPTY`, `Codec.unit` | `codec::Unit`, `codecs::Passthrough`, `codecs::Empty`, `Codec<T>::unit` |
+| `Unit`, `PASSTHROUGH`, `EMPTY`, `Codec.unit` | `codec::Unit`, `codecs::Passthrough` (`Codec<Dynamic>`), `codecs::Empty`, `Codec<T>::unit` |
 
 The port implements: primitive codecs (`Bool`, `Byte`, `Short`, `Int`, `Long`,
 `Float`, `Double`, `String`, `Passthrough`), `ListCodec`, `EitherCodec`,
@@ -431,7 +436,7 @@ struct Condition {
   std::vector<Condition> notClauses;   // JSON "not"
   std::optional<std::string> param;
   std::optional<std::string> op;
-  std::optional<JsonValue> value;      // any JSON value (Passthrough)
+  std::optional<Dynamic> value;       // any dynamic value (Passthrough)
   std::optional<std::string> listMatch;
 };
 
@@ -514,7 +519,7 @@ Intentional deviations and additions, all documented in the headers:
 
 | Area | DFU | Port | Why |
 | --- | --- | --- | --- |
-| `DynamicOps` value type | generic `T` (JsonElement, NbtTag, …) | a type-erased `Value` handle (owner + node + tag) | the ops layer is format-neutral now; `JsonValue` is the JSON DOM behind `JsonOps`, and `convertTo` becomes a real conversion once a second ops exists (see [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)) |
+| `DynamicOps` value type | generic `T` (JsonElement, NbtTag, …) | a type-erased `Value` handle (owner + node + tag), plus `Dynamic` (value + its ops) as the `Passthrough` carrier | the ops layer is format-neutral now; `JsonValue` is the JSON DOM behind `JsonOps`, and `convertTo` becomes a real conversion once a second ops exists (see [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)) |
 | `Stream<T>` | lazy Java streams | `std::vector` | no lazy streams in the standard library |
 | `KeyCompressor.compress` | unknown key → `0` (fastutil default) | unknown key → `-1` → treated as absent | avoids silently reading index 0 |
 | `UnboundedMapCodec` duplicates | `ImmutableMap.Builder` throws | last-wins, insertion order kept | keeps decoding usable |
@@ -531,11 +536,11 @@ Intentional deviations and additions, all documented in the headers:
 
 ## 6. Test layers
 
-174 GoogleTest cases in three independent executables. `ctest` prefixes each case
+181 GoogleTest cases in three independent executables. `ctest` prefixes each case
 with its layer (`unit.*`, `smoke.*`, `perf.*`), so any layer can be selected as a
 group.
 
-**`test/unit/` → `codec_unit_tests` (148 cases)** — component level, exhaustive
+**`test/unit/` → `codec_unit_tests` (155 cases)** — component level, exhaustive
 on edge cases:
 
 | File | Focus |
@@ -545,6 +550,7 @@ on edge cases:
 | `data_result_test.cpp` | `Lifecycle.add` rules, success/error/partial, `map`/`flatMap`/`apply2`/`apply3`, `promotePartial`, `getOrThrow` |
 | `primitives_test.cpp` | `Bool`/`Byte`/`Short`/`Int`/`Long`/`Float`/`Double`/`String`/`Passthrough`, `mergeToPrimitive` |
 | `dynamic_ops_test.cpp` | `JsonOps` primitives, `mergeToList/Map`, `MapLike` null rules, builders, `KeyCompressor`, compressed maps |
+| `dynamic_test.cpp` | `Dynamic` (value + its ops): construction, `asNumber`/`asString`/`asBoolean`, `get`/`getElement`, `set`/`remove`/`update`, `convertTo`, value-based equality, `decode` returning the remaining value |
 | `codec_combinators_test.cpp` | `xmap`/`flatXmap`/`comapFlatMap`/`flatComapMap`, `orElse`, `mapResult`, `either`, `pair`, `listOf`, `unboundedMap`, ranges, unit codecs, map-codec combinators |
 | `record_codec_test.cpp` | `record<>` in all forms, `fieldOf`/`optionalFieldOf`/`forGetter`, error joining, partial objects, keys, compression |
 | `dispatch_test.cpp` | `KeyDispatchCodec` (`partialDispatch`/`dispatch`/`dispatchMap`), map-codec payload merging, compressed dispatch |
@@ -697,9 +703,9 @@ produce identical structures, so the comparison is apples to apples).
   ```
 
   Sections 2–8 (`lifecycle`, `data_result`, `dynamic_ops`, `json_ops`, `codec`,
-  `codecs`, `record_codec`) only ever see `JsonValue` and `DynamicOps`. Swapping the
-  DOM — or removing the dependency in favour of your own — touches section 1 of
-  `codec.hpp` plus `scripts/fetch_deps.ps1` and nothing else.
+  `codecs`, `record_codec`) only ever see `Value`, `DynamicOps` and `Dynamic`.
+  Adding another format means writing one more `DynamicOps` (with its own DOM); the
+  JSON-specific code is confined to sections 1 and 5.
 * The intermediate DOM is not an accident of using nlohmann either: DFU's
   `DynamicOps<T>`/`MapLike` contract is **random access**. `dispatch` reads the
   type key and then re-decodes *the same map* with the selected codec,

@@ -19,9 +19,11 @@ using codec::codecs::Bool;
 using codec::codecs::Int;
 using codec::codecs::Passthrough;
 using codec::codecs::String;
+using codec::Dynamic;
 using codec::testing::decode;
 using codec::testing::decodeError;
 using codec::testing::encode;
+using codec::testing::dynamicJson;
 using codec::testing::json;
 
 enum class Level { Low, High };
@@ -160,9 +162,9 @@ TEST(EitherCodecTest, ReportsTheSecondFailureWhenNeitherMatches) {
 }
 
 TEST(PairCodecTest, ChainsCodecsOverTheRemainingPrefix) {
-  // Passthrough 在阶段 1 仍是 Codec<JsonValue>，两条都保留 JsonValue。
-  const Codec<std::pair<JsonValue, JsonValue>> codec = codec::pair(Passthrough, Passthrough);
-  const std::pair<JsonValue, JsonValue> expected{json("1"), json("null")};
+  // 阶段 2：Passthrough 的值类型是 Dynamic（值 + 懂它的 ops）。
+  const Codec<std::pair<Dynamic, Dynamic>> codec = codec::pair(Passthrough, Passthrough);
+  const std::pair<Dynamic, Dynamic> expected{dynamicJson("1"), dynamicJson("null")};
   // The first codec consumes the input, the second reads the first one's rest
   // (JsonOps primitives always leave ops.empty() behind).
   EXPECT_EQ(decode(codec, "1"), expected);

@@ -53,7 +53,7 @@ void printCondition(const risk::Condition& condition, const std::string& indent)
   std::cout << indent << "param=" << condition.param.value_or("<none>")
             << " op=" << condition.op.value_or("<none>");
   if (condition.value.has_value()) {
-    std::cout << " value=" << condition.value->dump();
+    std::cout << " value=" << condition.value->ops().toString(condition.value->value());
   }
   if (condition.listMatch.has_value()) {
     std::cout << " list_match=" << *condition.listMatch;

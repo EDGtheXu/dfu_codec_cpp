@@ -23,7 +23,7 @@
 namespace risk {
 
 using codec::Codec;
-using codec::JsonValue;
+using codec::Dynamic;
 
 struct LocalizedText {
   std::string cn;
@@ -43,7 +43,7 @@ struct Condition {
   std::vector<Condition> notClauses;  // JSON "not"
   std::optional<std::string> param;
   std::optional<std::string> op;
-  std::optional<JsonValue> value;
+  std::optional<Dynamic> value;  // any dynamic value (format agnostic; Passthrough)
   std::optional<std::string> listMatch;
 
   bool operator==(const Condition& other) const {

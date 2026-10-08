@@ -13,7 +13,7 @@
 
 * 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 4 400 行，CMake `INTERFACE` 目标，无需编译任何源文件
 * 头文件内的注释为**中文**；API 名、错误消息、测试名与两份 README 保持中英各自原本的语言
-* 分层测试：[`test/unit/`](test/unit)（148 个用例）、[`test/smoke/`](test/smoke)
+* 分层测试：[`test/unit/`](test/unit)（155 个用例）、[`test/smoke/`](test/smoke)
   （23 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
   性能对比）——每层一个独立可执行文件
 * 参考用例（风险定义文档）：[`models/risk_def.hpp`](models/risk_def.hpp)
@@ -69,7 +69,7 @@ powershell -File scripts/build.ps1 -RunTests
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 全部测试层，174 个用例
+ctest --test-dir build --output-on-failure   # 全部测试层，181 个用例
 cmake --build build --target check           # 等价的一键目标
 build/examples/risk_def_example.exe          # 可选：示例文档演示
 
@@ -160,6 +160,10 @@ DFU 的 `JsonOps` 基于 Gson 的 `JsonElement`。本移植改用 **nlohmann/jso
 某个节点，因此复制句柄、读取成员或遍历数组都是 O(1)，绝不会复制整棵 DOM。codec
 层保持简洁易读，同时应用侧仍可完全访问底层文档：
 
+`codec::Dynamic` 把一个值**和懂它的 ops** 绑在一起，这正是 `codecs::Passthrough`
+的载体（`Codec<Dynamic>`）：原始动态值离开 ops 就无法解释，也只有这一对能在格式之间
+搬运——`Dynamic::convertTo` 就是 `DynamicOps::convertTo` 开始真正干活的地方。
+
 `JsonValue` 之上是 ops 层自己的值类型 `codec::Value`：一个格式无关的句柄
 （共享所有者 + 节点指针 + 类型标签），所有 `DynamicOps` 实现都用它收发值，因此第二
 种格式（TOML、NBT）的 ops 可以直接插进同一批 codec。配 `JsonOps` 时载荷就是
@@ -225,7 +229,7 @@ scripts/               fetch_deps.ps1、build.ps1
 | `Optional<T>` | `std::optional<T>` |
 | `Pair<A, B>` | `std::pair<A, B>` |
 | `Either<L, R>` | `codec::Either<L, R>`（基于 variant） |
-| `Unit`、`PASSTHROUGH`、`EMPTY`、`Codec.unit` | `codec::Unit`、`codecs::Passthrough`、`codecs::Empty`、`Codec<T>::unit` |
+| `Unit`、`PASSTHROUGH`、`EMPTY`、`Codec.unit` | `codec::Unit`、`codecs::Passthrough`（`Codec<Dynamic>`）、`codecs::Empty`、`Codec<T>::unit` |
 
 已实现的具体内容：基础 codec（`Bool`、`Byte`、`Short`、`Int`、`Long`、`Float`、
 `Double`、`String`、`Passthrough`）、`ListCodec`、`EitherCodec`、`PairCodec`、
@@ -399,7 +403,7 @@ struct Condition {
   std::vector<Condition> notClauses;   // JSON "not"
   std::optional<std::string> param;
   std::optional<std::string> op;
-  std::optional<JsonValue> value;      // 任意 JSON 值（Passthrough）
+  std::optional<Dynamic> value;       // 任意动态值（Passthrough）
   std::optional<std::string> listMatch;
 };
 
@@ -475,7 +479,7 @@ Codec<Condition> conditionCodec() {
 
 | 方面 | DFU | 本移植 | 原因 |
 | --- | --- | --- | --- |
-| `DynamicOps` 值类型 | 泛型 `T`（JsonElement、NbtTag……） | 类型擦除的 `Value` 句柄（所有者 + 节点 + 标签） | ops 层已经格式无关；`JsonValue` 是 `JsonOps` 背后的 JSON DOM，`convertTo` 在接入第二种格式后就是真正的转换（设计见 [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)） |
+| `DynamicOps` 值类型 | 泛型 `T`（JsonElement、NbtTag……） | 类型擦除的 `Value` 句柄（所有者 + 节点 + 标签），外加 `Dynamic`（值 + 它的 ops）作为 `Passthrough` 的载体 | ops 层已经格式无关；`JsonValue` 是 `JsonOps` 背后的 JSON DOM，`convertTo` 在接入第二种格式后就是真正的转换（设计见 [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)） |
 | `Stream<T>` | Java 惰性流 | `std::vector` | 标准库没有惰性流 |
 | `KeyCompressor.compress` | 未知键 → `0`（fastutil 默认值） | 未知键 → `-1` → 视为不存在 | 避免静默读取索引 0 |
 | `UnboundedMapCodec` 重复键 | `ImmutableMap.Builder` 抛异常 | 后者覆盖，保持插入顺序 | 保证解码可用 |
@@ -492,10 +496,10 @@ Codec<Condition> conditionCodec() {
 
 ## 6. 测试分层
 
-174 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
+181 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
 前缀（`unit.*`、`smoke.*`、`perf.*`），因此任何一层都可以按组选择运行。
 
-**`test/unit/` → `codec_unit_tests`（148 个用例）**——组件级，覆盖各种边界情况：
+**`test/unit/` → `codec_unit_tests`（155 个用例）**——组件级，覆盖各种边界情况：
 
 | 文件 | 关注点 |
 | --- | --- |
@@ -504,6 +508,7 @@ Codec<Condition> conditionCodec() {
 | `data_result_test.cpp` | `Lifecycle.add` 规则、成功/错误/部分值、`map`/`flatMap`/`apply2`/`apply3`、`promotePartial`、`getOrThrow` |
 | `primitives_test.cpp` | `Bool`/`Byte`/`Short`/`Int`/`Long`/`Float`/`Double`/`String`/`Passthrough`、`mergeToPrimitive` |
 | `dynamic_ops_test.cpp` | `JsonOps` 基础操作、`mergeToList/Map`、`MapLike` 的 null 规则、构建器、`KeyCompressor`、压缩 map |
+| `dynamic_test.cpp` | `Dynamic`（值 + 它的 ops）：构造、`asNumber`/`asString`/`asBoolean`、`get`/`getElement`、`set`/`remove`/`update`、`convertTo`、按值相等、`decode` 返回余下的值 |
 | `codec_combinators_test.cpp` | `xmap`/`flatXmap`/`comapFlatMap`/`flatComapMap`、`orElse`、`mapResult`、`either`、`pair`、`listOf`、`unboundedMap`、范围校验、unit codec、map codec 组合子 |
 | `record_codec_test.cpp` | 各种形式的 `record<>`、`fieldOf`/`optionalFieldOf`/`forGetter`、错误合并、部分对象、keys、压缩 |
 | `dispatch_test.cpp` | `KeyDispatchCodec`（`partialDispatch`/`dispatch`/`dispatchMap`）、map codec 载荷合并、压缩 dispatch |
@@ -640,8 +645,9 @@ Codec 层付出了 2–3 倍解析代价却没有收益；此时 `get<T>()` 或�
   ```
 
   第 2–8 节（`lifecycle`、`data_result`、`dynamic_ops`、`json_ops`、`codec`、
-  `codecs`、`record_codec`）只会看到 `JsonValue` 与 `DynamicOps`。要替换 DOM——或
-  干脆去掉这个依赖改用自研实现——只需改动 `codec.hpp` 的第 1 节与
+  `codecs`、`record_codec`）只会看到 `Value`、`DynamicOps` 与 `Dynamic`。要接第二种格式，
+  就是再写一个 `DynamicOps`（连同它自己的 DOM）——JSON 专有代码只集中在第 1、5 段；
+  而"换掉 nlohmann 这个依赖"仍然只需改动 `codec.hpp` 的第 1 节与
   `scripts/fetch_deps.ps1`，其他部分一行都不用动。
 * 中间的 DOM 也不是"用了 nlohmann"才产生的：DFU 的 `DynamicOps<T>`/`MapLike` 契约
   本身就是**随机访问**的。`dispatch` 先读类型键，再用选中的 codec 对*同一个 map*

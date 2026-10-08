@@ -30,6 +30,11 @@ A decode(const Codec<A>& codec, const std::string& text,
   return *result.result();
 }
 
+// 阶段 2：Passthrough 的值类型是 codec::Dynamic（值 + 懂它的 ops）。
+inline Dynamic dynamicJson(const std::string& text) {
+  return Dynamic(JsonOps::INSTANCE, Value(JsonValue::parse(text)));
+}
+
 // Encodes a value and returns the JSON text.
 template <class A>
 std::string encode(const Codec<A>& codec, const typename Codec<A>::value_type& value,

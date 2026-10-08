@@ -17,9 +17,12 @@ using codec::codecs::Long;
 using codec::codecs::Passthrough;
 using codec::codecs::Short;
 using codec::codecs::String;
+using codec::Dynamic;
 using codec::testing::decode;
 using codec::testing::decodeError;
 using codec::testing::encode;
+using codec::testing::dynamicJson;
+using codec::testing::dumpJson;
 using codec::testing::json;
 
 TEST(PrimitiveCodecTest, Bool) {
@@ -89,17 +92,17 @@ TEST(PrimitiveCodecTest, EncodeUsesMergeToPrimitive) {
 }
 
 TEST(PrimitiveCodecTest, PassthroughKeepsArbitraryJson) {
-  EXPECT_EQ(encode(Passthrough, json(R"({"a":[1,2]})")), R"({"a":[1,2]})");
-  EXPECT_EQ(encode(Passthrough, json("\"text\"")), "\"text\"");
-  EXPECT_EQ(encode(Passthrough, json("null")), "null");
+  EXPECT_EQ(encode(Passthrough, dynamicJson(R"({"a":[1,2]})")), R"({"a":[1,2]})");
+  EXPECT_EQ(encode(Passthrough, dynamicJson("\"text\"")), "\"text\"");
+  EXPECT_EQ(encode(Passthrough, dynamicJson("null")), "null");
 
-  const JsonValue decoded = decode(Passthrough, R"({"nested":{"x":true}})");
-  EXPECT_EQ(decoded.dump(), R"({"nested":{"x":true}})");
+  const Dynamic decoded = decode(Passthrough, R"({"nested":{"x":true}})");
+  EXPECT_EQ(dumpJson(decoded.value()), R"({"nested":{"x":true}})");
 }
 
 TEST(PrimitiveCodecTest, PassthroughMergesIntoAMapPrefix) {
   const DataResult<Value> merged =
-      Passthrough.encode(json(R"({"b":2})"), JsonOps::INSTANCE, json(R"({"a":1})"));
+      Passthrough.encode(dynamicJson(R"({"b":2})"), JsonOps::INSTANCE, json(R"({"a":1})"));
   ASSERT_TRUE(merged.result().has_value());
   EXPECT_EQ(merged.result()->asJson().dump(), R"({"a":1,"b":2})");
 }

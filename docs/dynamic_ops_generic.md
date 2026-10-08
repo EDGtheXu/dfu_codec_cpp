@@ -47,21 +47,40 @@ struct Value {
 关键点：`JsonValue` 本身就是「`shared_ptr<const Raw>` 所有者 + 指向文档的 `const Raw*`」，
 所以 `Value` 与它**同构**，装箱只是复制所有者（一次原子加一），不分配、不拷贝文档。
 
-### 3.2 `Dynamic`：值 + 它的 ops
+### 3.2 `Dynamic`：值 + 它的 ops（**阶段 2 已落地**）
 
 DFU 的 `com.mojang.serialization.Dynamic<T>`。它解决一件事：`Codec.PASSTHROUGH` 需要一个
-"原始动态值"的载体（今天这里是 `Codec<JsonValue>`，是 DOM 类型唯一渗进 codec 层的地方）。
+"原始动态值"的载体，而值离开它所属的 ops 就无法解释（`Value` 只是擦除句柄）。Dynamic 把两者
+绑在一起，因此也是跨格式搬运的入口；`codecs::Passthrough` 现在是 `Codec<Dynamic>`。
 
 ```cpp
 class Dynamic {
  public:
-  const DynamicOps& ops() const;
-  const Value& value() const;
-  template <class A> DataResult<A> read(const Codec<A>&) const;
-  template <class A> DataResult<Dynamic> write(const Codec<A>&, const A&) const;
-  DataResult<Dynamic> convertTo(const DynamicOps& outOps) const;
+  explicit Dynamic(const DynamicOps& ops);                  // = Dynamic(ops, ops.empty())
+  Dynamic(const DynamicOps& ops, Value value);
+  const DynamicOps& ops() const;  const Value& value() const;
+  Dynamic withValue(Value) const;  Value castTo(const DynamicOps&) const;
+  Dynamic convertTo(const DynamicOps& outOps) const;        // DFU 的 convert
+  template <class A> DataResult<std::pair<A, Dynamic>> decode(const Decoder<A>&) const;
+  DataResult<Number> asNumber() const;  DataResult<std::string> asString() const;
+  DataResult<bool> asBoolean() const;                       // 补充（DFU 在 DynamicLike 里）
+  std::optional<Dynamic> get(const std::string& key) const; // DFU 返回 OptionalDynamic
+  std::optional<Dynamic> getElement(int32_t index) const;   // 列表版本是补充
+  Dynamic set(const std::string&, const Dynamic&) const;
+  Dynamic remove(const std::string&) const;
+  Dynamic update(const std::string&, const std::function<Dynamic(const Dynamic&)>&) const;
+  bool operator==(const Dynamic&) const;                    // 只比值，不比 ops 身份
 };
 ```
+
+相对 DFU 省略的 API：`OptionalDynamic`（改用 `std::optional<Dynamic>`）、
+`castTyped`/`cast`（改为按需转换 `castTo`；DFU 在 ops 不一致时抛异常）、
+`asByteBufferOpt`/`asIntStreamOpt`/`asLongStreamOpt`（NBT 的字节/整数流视图）、
+`merge`/`getMapValues`/`updateMapValues`（ops 层已有对应实现）、
+`map`/`into`/`hashCode`（Java 的函数式糖与哈希）。
+
+两处有意偏离：`decode` 把余下的值也包成 `Dynamic` 返回（DFU 返回裸的 `T`）；
+`operator==` 只比较值而不比 ops 身份（ops 是单例，比身份会让"不同实例、同一份数据"永不相等）。
 
 ### 3.3 `convertTo` 从恒等变成真转换
 
@@ -153,7 +172,7 @@ codec 解码 16 422 ns（基线 15 500，+5.9 %），比值 vs 裸 parser 1.344�
 跨格式误用的明确诊断；为了 1~2 % 的比值去换成 24 字节（类型由 ops 自负）不划算。若将来确有需要，
 这条记录就是当时的取舍依据。
 
-## 5. 阶段 1–4（每阶段门禁：174/174 + perf 复测）
+## 5. 阶段 1–4（每阶段门禁：全绿 + perf 复测）
 
 改动面（按段量化，`JsonValue` 出现次数）：
 
@@ -166,7 +185,7 @@ codec 解码 16 422 ns（基线 15 500，+5.9 %），比值 vs 裸 parser 1.344�
 | 阶段 | 内容 | 门禁 | 状态 |
 | --- | --- | --- | --- |
 | 1 | 4–5 段 + 6–8 段改签名；`JsonOps` 装箱/拆箱；`JsonValue` 公开 API 不变 | 174 + perf ≤5 % | **完成**（174/174；绝对性能持平，见 §4.2） |
-| 2 | `Passthrough` → `Codec<Dynamic>`；`models/risk_def.hpp` 的 `value` 成员跟进；`Dynamic` 类型落地 | 174 | 待做 |
+| 2 | `Passthrough` → `Codec<Dynamic>`；`models/risk_def.hpp` 的 `value` 成员跟进；`Dynamic` 类型落地 | 全绿 | **完成**（181/181；`Passthrough` 严格照 `Codec.java:197-224`；新增 `test/unit/dynamic_test.cpp` 7 个用例；头文件里 `value.asJson()` 调用点 43 → **0**） |
 | 3 | `TomlOps`（toml++ 单头文件）实现 ops；「同一 codec 吃 JSON/TOML → 同结构」交叉用例；TOML 行列错误位置；`convertTo` 变成真转换 | 新增用例 | 待做 |
 | 4 | 文档：格式支持矩阵、§7 性能重测、删除原型与本文档的实验章节 | — | 待做 |
 
@@ -191,8 +210,11 @@ ops 级钩子：`DynamicOps::getMap` 的默认实现（构造 `JsonObjectMapLike
 * **阶段 1 已经变的**：`encodeStart` 现在返回 `DataResult<Value>`（配 JsonOps 时用
   `result()->asJson()` 取回 JSON 节点）；`DynamicOps`/`MapLike`/builder 的签名收发 `Value`。
   两份 README 的示例与"值类型"章节已同步。
-* **阶段 2 要改的**：`Codec.PASSTHROUGH` 的字段类型 `JsonValue` → `codec::Dynamic`
-  （`models/risk_def.hpp` 的 `std::optional<JsonValue> value`）。
+* **阶段 2 已经改的**：`codecs::Passthrough` 现在是 `Codec<Dynamic>`，因此
+  `models/risk_def.hpp` 的 `std::optional<JsonValue> value` 变成了
+  `std::optional<Dynamic> value`；渲染动态值请用
+  `value->ops().toString(value->value())`（示例里就是这么做的，输出文本不变），
+  `Value::asJson()` 仍然保留，但只作为 JSON 的逃生口（库内部已无调用点）。
 * **新增**：`TomlOps::INSTANCE` 可直接喂给同一批 codec；`Dynamic::convertTo` 在格式间搬运。
 
 ## 7. 风险与对策

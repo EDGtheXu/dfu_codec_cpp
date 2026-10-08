@@ -3634,6 +3634,127 @@ inline MapCodec<A> Codec<A>::optionalFieldOfStrict(const std::string& name, A de
       }));
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic —— DFU 的 com.mojang.serialization.Dynamic<T>：动态值 + 懂它的 ops
+//
+// 它解决一件事：`Codec.PASSTHROUGH` 需要一个"原始动态值"的载体，而值离开
+// 它所属的 ops 就无法解释（`Value` 只是擦除句柄）。Dynamic 把两者绑在一起，
+// 因此它也是跨格式搬运（convertTo）的入口。
+//
+// 相对 DFU 省略的 API（本移植用不到，或与 C++ 的表达方式不符）：
+//   * `OptionalDynamic`：DFU 用它表达"可能不存在的动态值"；本移植改用
+//     `std::optional<Dynamic>`（见 get / getElement）；
+//   * `castTyped` / `cast`：DFU 在 ops 不一致时抛 IllegalStateException；
+//     本移植改为按需转换（castTo）——`DynamicOps::convertTo` 是全函数；
+//   * `asByteBufferOpt` / `asIntStreamOpt` / `asLongStreamOpt`：面向 NBT 的
+//     字节流/整数流视图，JSON 侧没有对应物；
+//   * `merge`（两个重载）/ `getMapValues` / `updateMapValues`：这些返回
+//     OptionalDynamic 或 Map 的辅助方法在 ops 层已有对应实现
+//     （`mergeToList` / `mergeToMap` / `getMapValues`）；
+//   * `map` / `into` / `hashCode`：Java 的函数式糖与哈希，C++ 侧直接用成员
+//     或 std::hash 的语义即可，未提供。
+//
+// 有意的偏离（都写在对应方法的注释里）：
+//   * `decode` 把余下的值也包成 Dynamic 返回（DFU 返回裸的 `Pair<A, T>`）；
+//   * `operator==` 只比较值、不比较 ops 身份（DFU 先比 ops）。
+// ---------------------------------------------------------------------------
+class Dynamic {
+ public:
+  // DFU: Dynamic(DynamicOps<T>) —— 空值（ops.empty()）。
+  explicit Dynamic(const DynamicOps& ops) : Dynamic(ops, ops.empty()) {}
+  Dynamic(const DynamicOps& ops, Value value) : ops_(&ops), value_(std::move(value)) {}
+
+  const DynamicOps& ops() const { return *ops_; }
+  // DFU 的 getValue()。
+  const Value& value() const { return value_; }
+
+  // 换一个值、保留 ops（DFU 的 map(Function) 在本移植里的等价物）。
+  Dynamic withValue(Value value) const { return Dynamic(*ops_, std::move(value)); }
+
+  // DFU 的 cast(DynamicOps<U>)：同一个 ops 时直接返回；不同 ops 时 DFU 抛
+  // "Dynamic type doesn't match"，这里改为转换（convertTo 是全函数）。
+  Value castTo(const DynamicOps& ops) const {
+    if (&ops == ops_) {
+      return value_;
+    }
+    return ops_->convertTo(ops, value_);
+  }
+
+  // DFU 的 convert(DynamicOps<R>)（静态 convert(inOps, outOps, input) 的语义：
+  // 同一个 ops 时恒等，否则由源 ops 转换）。
+  Dynamic convertTo(const DynamicOps& outOps) const { return Dynamic(outOps, castTo(outOps)); }
+
+  // DFU 的 `decode(Decoder<? extends A>)`。
+  // 偏离：余下的值也用同一个 ops 包成 Dynamic 返回（DFU 返回裸的 T），
+  // 调用方不必自己再包一次。
+  template <class A>
+  DataResult<std::pair<A, Dynamic>> decode(const Decoder<A>& decoder) const {
+    return decoder.decode(*ops_, value_).map([this](const std::pair<A, Value>& decoded) {
+      return std::make_pair(decoded.first, Dynamic(*ops_, decoded.second));
+    });
+  }
+
+  // DFU: asNumber() / asString()（返回 DataResult）。asBoolean 是补充。
+  DataResult<Number> asNumber() const { return ops_->getNumberValue(value_); }
+  DataResult<std::string> asString() const { return ops_->getStringValue(value_); }
+  DataResult<bool> asBoolean() const { return ops_->getBooleanValue(value_); }
+
+  // DFU 的 get(String) 返回 OptionalDynamic；这里简化为 optional
+  // （取不到就是 nullopt，不产生错误消息）。
+  std::optional<Dynamic> get(const std::string& key) const {
+    const DataResult<MapLikePtr> map = ops_->getMap(value_);
+    if (!map.result().has_value()) {
+      return std::nullopt;
+    }
+    const std::optional<Value> found = (*map.result())->get(key);
+    if (!found.has_value()) {
+      return std::nullopt;
+    }
+    return Dynamic(*ops_, *found);
+  }
+
+  // 列表按下标取元素（DFU 的 getElement(String) 是按"键"取值，列表版本是补充）。
+  std::optional<Dynamic> getElement(int32_t index) const {
+    const DataResult<std::vector<Value>> stream = ops_->getStream(value_);
+    if (!stream.result().has_value()) {
+      return std::nullopt;
+    }
+    const std::vector<Value>& elements = *stream.result();
+    if (index < 0 || static_cast<size_t>(index) >= elements.size()) {
+      return std::nullopt;
+    }
+    return Dynamic(*ops_, elements[static_cast<size_t>(index)]);
+  }
+
+  // DFU: set(String, Dynamic<?>) —— 另一个 Dynamic 的值会按需转换到本 ops。
+  Dynamic set(const std::string& key, const Dynamic& value) const {
+    return withValue(ops_->set(value_, key, value.castTo(*ops_)));
+  }
+
+  // DFU: remove(String)。
+  Dynamic remove(const std::string& key) const { return withValue(ops_->remove(value_, key)); }
+
+  // DFU: update(String, Function<Dynamic<?>, Dynamic<?>>)。
+  Dynamic update(const std::string& key,
+                 const std::function<Dynamic(const Dynamic&)>& function) const {
+    return withValue(ops_->update(value_, key, [this, &function](const Value& current) {
+      return function(Dynamic(*ops_, current)).castTo(*ops_);
+    }));
+  }
+
+  // 与 DFU 的 equals 有一处有意差别：DFU 先比较 ops 再比较值，这里只比较值
+  // （ops 是单例；比较身份会让"不同实例、同一份数据"的 Dynamic 永不相等），
+  // 且比较走 ops 的 valueEquals，因此跨 ops 也能比。
+  bool operator==(const Dynamic& other) const {
+    return ops_->valueEquals(value_, other.castTo(*ops_));
+  }
+  bool operator!=(const Dynamic& other) const { return !(*this == other); }
+
+ private:
+  const DynamicOps* ops_;
+  Value value_;
+};
+
 }  // namespace codec
 
 
@@ -3781,38 +3902,44 @@ inline const Codec<std::string> String = detail::primitiveCodec<std::string>(
     [](const DynamicOps& ops, const Value& input) { return ops.getStringValue(input); },
     [](const DynamicOps& ops, const std::string& value) { return ops.createString(value); });
 
-// Codec.PASSTHROUGH -- 把原始动态值原样透传。
+// Codec.PASSTHROUGH -- 把原始动态值原样透传（移植自 Codec.java:197-224）。
 //
-// 阶段 1：它仍然是 `Codec<JsonValue>`（用户侧字段类型不变，`models/risk_def.hpp`
-// 不用改），内部靠 `JsonValue → Value` 的隐式装箱与 `Value::asJson()` 往返；
-// 阶段 2 会换成 `Codec<Dynamic>`（DFU 的 Codec.PASSTHROUGH 就是 Codec<Dynamic<?>>）。
-// 因此这一版 Passthrough 只能配 JsonOps 使用。
-inline const Codec<JsonValue> Passthrough = Codec<JsonValue>::of(
-    Encoder<JsonValue>([](const JsonValue& input, const DynamicOps& ops, const Value& prefix) {
+// 值类型是 `Dynamic`（值 + 懂它的 ops），因为"原始动态值"离开 ops 无法解释，
+// 而且只有它能跨格式搬运：编码时先 `convertTo` 到目标 ops，再按 map → list
+// 的顺序尝试与 prefix 合并。这也是 `DynamicOps::convertTo` 第一次真正派上用场。
+inline const Codec<Dynamic> Passthrough = Codec<Dynamic>::of(
+    Encoder<Dynamic>([](const Dynamic& input, const DynamicOps& ops, const Value& prefix) {
+      if (ops.valueEquals(input.value(), input.ops().empty())) {
+        return DataResult<Value>::success(prefix, Lifecycle::experimental());
+      }
+      // DFU: input.convert(ops).getValue() —— 同一个 ops 时直接复用值。
+      const Value casted = (&input.ops() == &ops) ? input.value()
+                                                  : input.ops().convertTo(ops, input.value());
       if (ops.valueEquals(prefix, ops.empty())) {
-        return DataResult<Value>::success(Value(input), Lifecycle::experimental());
+        return DataResult<Value>::success(casted, Lifecycle::experimental());
       }
-      if (input.isObject()) {
-        const JsonObjectMapLike map(input);
-        return ops.mergeToMap(prefix, map);
-      }
-      if (input.isArray()) {
-        // asArray() 是 vector<JsonValue>，合并前逐个装箱（只复制所有者）。
-        const JsonValue::Array elements = input.asArray();
-        std::vector<Value> boxed;
-        boxed.reserve(elements.size());
-        for (const JsonValue& element : elements) {
-          boxed.push_back(element);
+      // 先试 map 合并，再试 list 合并，都不行才报错（DFU 的原话）。
+      const DataResult<MapLikePtr> asMap = ops.getMap(casted);
+      if (asMap.result().has_value()) {
+        const DataResult<Value> merged = ops.mergeToMap(prefix, **asMap.result());
+        if (merged.result().has_value()) {
+          return DataResult<Value>::success(*merged.result());
         }
-        return ops.mergeToList(prefix, boxed);
+      }
+      const DataResult<std::vector<Value>> asList = ops.getStream(casted);
+      if (asList.result().has_value()) {
+        const DataResult<Value> merged = ops.mergeToList(prefix, *asList.result());
+        if (merged.result().has_value()) {
+          return DataResult<Value>::success(*merged.result());
+        }
       }
       return DataResult<Value>::error(
-          "Don't know how to merge " + ops.toString(prefix) + " and " + ops.toString(Value(input)),
+          "Don't know how to merge " + ops.toString(prefix) + " and " + ops.toString(casted),
           prefix, Lifecycle::experimental());
     }),
-    Decoder<JsonValue>([](const DynamicOps& ops, const Value& input) {
-      return DataResult<std::pair<JsonValue, Value>>::success(
-          std::make_pair(input.asJson(), ops.empty()));
+    Decoder<Dynamic>([](const DynamicOps& ops, const Value& input) {
+      return DataResult<std::pair<Dynamic, Value>>::success(
+          std::make_pair(Dynamic(ops, input), ops.empty()), Lifecycle::experimental());
     }),
     "passthrough");
 

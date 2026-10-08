@@ -13,6 +13,8 @@ using codec::DataResult;
 using codec::JsonOps;
 using codec::JsonValue;
 using codec::Value;
+using codec::testing::dynamicJson;
+using codec::testing::dumpJson;
 using risk::Condition;
 using risk::RiskDef;
 using risk::RiskDocument;
@@ -62,7 +64,7 @@ TEST(RiskDefTest, DecodesTheOrCondition) {
   EXPECT_EQ(*condition.orClauses[1].param, "default_mode");
   EXPECT_EQ(*condition.orClauses[1].op, "eq");
   ASSERT_TRUE(condition.orClauses[1].value.has_value());
-  EXPECT_EQ(condition.orClauses[1].value->dump(), "\"bypassPermissions\"");
+  EXPECT_EQ(dumpJson(condition.orClauses[1].value->value()), "\"bypassPermissions\"");
 }
 
 TEST(RiskDefTest, DecodesALeafConditionWithListMatch) {
@@ -73,7 +75,7 @@ TEST(RiskDefTest, DecodesALeafConditionWithListMatch) {
   EXPECT_EQ(*condition.param, "mcp_args");
   EXPECT_EQ(*condition.op, "contains");
   ASSERT_TRUE(condition.value.has_value());
-  EXPECT_EQ(condition.value->asString(), "--dangerously-skip-permissions");
+  EXPECT_EQ(*condition.value->asString().result(), "--dangerously-skip-permissions");
   ASSERT_TRUE(condition.listMatch.has_value());
   EXPECT_EQ(*condition.listMatch, "any");
   EXPECT_TRUE(condition.orClauses.empty());
@@ -270,9 +272,12 @@ TEST(RiskDefTest, NestedConditionalGroupsAreRecursive) {
   const Condition& group = root.orClauses[0];
   ASSERT_EQ(group.andClauses.size(), 2u);
   ASSERT_TRUE(group.andClauses[0].value.has_value());
-  // Passthrough keeps the JSON value type: 1 stays a number.
-  EXPECT_TRUE(group.andClauses[0].value->isNumber());
-  EXPECT_EQ(group.andClauses[0].value->asNumber().intValue(), 1);
+  // Passthrough keeps the value type: 1 stays a number.
+  // 这里刻意用 JSON 节点访问器而不是 ops 的 asNumber()：JsonOps 的
+  // getNumberValue 会把布尔强制成数字（移植的既有怪癖），
+  // 那样 `true` 也能通过这些断言，断言强度就弱了。
+  EXPECT_TRUE(group.andClauses[0].value->value().asJson().isNumber());
+  EXPECT_EQ(group.andClauses[0].value->value().asJson().asNumber().intValue(), 1);
   ASSERT_EQ(group.andClauses[1].notClauses.size(), 1u);
   EXPECT_EQ(*group.andClauses[1].notClauses[0].param, "b");
 
@@ -303,7 +308,7 @@ TEST(RiskDefTest, EncodesAHandBuiltDocument) {
   Condition leaf;
   leaf.param = "p";
   leaf.op = "eq";
-  leaf.value = JsonValue::string("v");
+  leaf.value = dynamicJson("\"v\"");
   leaf.listMatch = "any";
   risk.condition = leaf;
   document.risks.push_back(risk);
