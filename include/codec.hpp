@@ -2913,6 +2913,52 @@ inline const Codec<JsonValue> Passthrough = Codec<JsonValue>::of(
 // Codec.EMPTY
 inline const Codec<Unit> Empty = Codec<Unit>::empty();
 
+// ---------------------------------------------------------------------------
+// stringEnum -- addition without a DFU counterpart
+//
+// Maps an enum to and from its JSON *name* through a name table, which is what
+// Minecraft does with StringRepresentable.fromEnum (that helper lives in
+// Minecraft, not in DataFixerUpper, so there is nothing to port here).  It is
+// implemented with Codec::flatXmap, so it composes like any other codec: use it
+// in fields, lists, dispatch, optional fields, ...
+//
+//     enum class Severity { Low, Medium, Critical };
+//     const Codec<Severity> SeverityCodec = codecs::stringEnum<Severity>(
+//         {{"low", Severity::Low},
+//          {"medium", Severity::Medium},
+//          {"critical", Severity::Critical}},
+//         "Severity");
+//
+// An unknown name fails with `Unknown Severity: "fatal"`, and a value that is not
+// in the table fails encoding with `Unmapped Severity value`.  `E` must be
+// equality comparable; the table is copied once and shared by both directions.
+//
+// The other direction -- numbers, or enums serialised as numbers -- needs no
+// helper: `Int.xmap<E>(toEnum, toInt)` or `Int.flatXmap<E>(...)` when the mapping
+// can fail.  See test/unit/string_and_enum_test.cpp for all four combinations.
+template <class E>
+Codec<E> stringEnum(std::vector<std::pair<std::string, E>> values, std::string name = "enum") {
+  const auto table =
+      std::make_shared<const std::vector<std::pair<std::string, E>>>(std::move(values));
+  return String.flatXmap<E>(
+      [table, name](const std::string& text) -> DataResult<E> {
+        for (const auto& entry : *table) {
+          if (entry.first == text) {
+            return DataResult<E>::success(entry.second);
+          }
+        }
+        return DataResult<E>::error("Unknown " + name + ": \"" + text + "\"");
+      },
+      [table, name](const E& value) -> DataResult<std::string> {
+        for (const auto& entry : *table) {
+          if (entry.second == value) {
+            return DataResult<std::string>::success(entry.first);
+          }
+        }
+        return DataResult<std::string>::error("Unmapped " + name + " value");
+      });
+}
+
 }  // namespace codecs
 
 // ---------------------------------------------------------------------------

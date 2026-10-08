@@ -12,7 +12,7 @@
 不纳入版本管理——脚本的作用是让本次移植的来源可复现。
 
 * 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 3 700 行，CMake `INTERFACE` 目标，无需编译任何源文件
-* 分层测试：[`test/unit/`](test/unit)（118 个用例）、[`test/smoke/`](test/smoke)
+* 分层测试：[`test/unit/`](test/unit)（127 个用例）、[`test/smoke/`](test/smoke)
   （21 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
   性能对比）——每层一个独立可执行文件
 * 参考用例（风险定义文档）：[`models/risk_def.hpp`](models/risk_def.hpp)
@@ -63,7 +63,7 @@ powershell -File scripts/build.ps1 -RunTests
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 全部测试层，142 个用例
+ctest --test-dir build --output-on-failure   # 全部测试层，151 个用例
 cmake --build build --target check           # 等价的一键目标
 build/examples/risk_def_example.exe          # 可选：示例文档演示
 ```
@@ -218,6 +218,23 @@ scripts/               fetch_deps.ps1、build.ps1
 不在移植范围内（DFU 中建立在 Codec *之上* 的部分）：`DataFixer`、`Schema`、
 `TypeRewriteRule`、optics/profunctor 机制以及 `NbtOps`/`Dynamic` 包装。
 
+### 标量转换（enum、数字、字符串）
+
+库里没有单独的"枚举 codec"或"字符串数字 codec"：所有组合都由同样的两个组合子搭出来，
+因此可以和字段、列表、`dispatch`、可选字段等自由组合。
+
+| JSON | C++ | 写法 |
+| --- | --- | --- |
+| 数字 | `enum class` | `Int.flatXmap<E>(toEnum, toInt)`（映射不会失败时也可用 `Int.xmap<E>`） |
+| 字符串 | `enum class` | `codecs::stringEnum<E>({{"low", E::Low}, ...}, "E")`，或手写 `String.flatXmap<E>` |
+| 字符串 | 数字 | `String.flatXmap<int32_t>(parse, toString)`——严格解析建议用 `std::from_chars` |
+| 数字 | `std::string` | `Int.xmap<std::string>(std::to_string, ...)`（JSON 里仍是数字） |
+| 数字*或*字符串 | 数字 | `either(Int, String).flatXmap<int32_t>(...)`——`8080` 与 `"8080"` 都接受，编码时统一输出数字 |
+
+`test/unit/string_and_enum_test.cpp` 是上面五行可直接运行的示例集，包含错误消息
+（`Unknown Severity: "fatal"`、`Not a number: "80x"`）以及 `optionalFieldOf` 对
+`null` 或非法枚举名的处理方式。
+
 ## 4. 参考用例
 
 `models/risk_def.hpp` 建模了风险定义文档，包括其递归的条件树：
@@ -282,7 +299,7 @@ Codec<Condition> conditionCodec() {
   （`["bob",42,["a"],["c","z"]]`），索引顺序由 `KeyCompressor` 从
   `MapCodec::keys` 推导。
 
-有意保留的差异（均已在头文件中注明）：
+有意保留的差异与补充（均已在头文件中注明）：
 
 | 方面 | DFU | 本移植 | 原因 |
 | --- | --- | --- | --- |
@@ -293,13 +310,15 @@ Codec<Condition> conditionCodec() {
 | `CompressedMapLike` 越界索引 | `IndexOutOfBoundsException` | 视为不存在 | 解码路径中不抛异常 |
 | `Encoder.error(msg)` | 追加值的 `toString` | 原样使用消息 | C++ 没有统一的 `toString` |
 | `Codec.optionalFieldOf(name, Lifecycle, …)` | 4 参数重载 | 未移植 | 极少使用；`.stable()` 已可覆盖 |
+| `codec::recursive<A>(supplier)`（**新增**） | —（Java 通过 datafixer 图表达递归） | 提供 | 首次使用时才解析 supplier，同时打破静态初始化环 |
+| `codecs::stringEnum<E>(table, name)`（**新增**） | —（MC 用 `StringRepresentable.fromEnum`，它不在 DFU 里） | 提供 | 用名字表处理枚举、免去样板代码；基于 `flatXmap` 实现，因此可像其他 codec 一样组合 |
 
 ## 6. 测试分层
 
-142 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
+151 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
 前缀（`unit.*`、`smoke.*`、`perf.*`），因此任何一层都可以按组选择运行。
 
-**`test/unit/` → `codec_unit_tests`（118 个用例）**——组件级，覆盖各种边界情况：
+**`test/unit/` → `codec_unit_tests`（127 个用例）**——组件级，覆盖各种边界情况：
 
 | 文件 | 关注点 |
 | --- | --- |
@@ -311,6 +330,7 @@ Codec<Condition> conditionCodec() {
 | `codec_combinators_test.cpp` | `xmap`/`flatXmap`/`comapFlatMap`/`flatComapMap`、`orElse`、`mapResult`、`either`、`pair`、`listOf`、`unboundedMap`、范围校验、unit codec、map codec 组合子 |
 | `record_codec_test.cpp` | 各种形式的 `record<>`、`fieldOf`/`optionalFieldOf`/`forGetter`、错误合并、部分对象、keys、压缩 |
 | `dispatch_test.cpp` | `KeyDispatchCodec`（`partialDispatch`/`dispatch`/`dispatchMap`）、map codec 载荷合并、压缩 dispatch |
+| `string_and_enum_test.cpp` | 标量转换示例集：数字↔枚举、字符串↔枚举（含 `codecs::stringEnum`）、字符串↔数字、`either` 实现"数字或字符串"、枚举用于字段/列表/可选字段 |
 | `odr_test.cpp` + `odr_probe.cpp` | 仅头文件保证：两个都包含该单头文件的翻译单元能一起链接，且 inline 单例在两个 TU 中地址一致 |
 | `header_self_contained_test.cpp` | 在其余所有头文件之前包含 `codec.hpp`，证明单头文件可独立编译 |
 

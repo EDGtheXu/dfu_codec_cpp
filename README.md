@@ -15,7 +15,7 @@ The reference implementation was decompiled from
 the port's provenance can be reproduced.
 
 * Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~3 700 lines, CMake `INTERFACE` target, nothing to build
-* Layered tests: [`test/unit/`](test/unit) (118 cases), [`test/smoke/`](test/smoke) (21 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
+* Layered tests: [`test/unit/`](test/unit) (127 cases), [`test/smoke/`](test/smoke) (21 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -64,7 +64,7 @@ Or drive CMake directly:
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # all layers, 142 cases
+ctest --test-dir build --output-on-failure   # all layers, 151 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
 ```
@@ -230,6 +230,24 @@ Out of scope (DFU packages that build *on* Codec): `DataFixer`, `Schema`,
 `TypeRewriteRule`, the optics/profunctor machinery and `NbtOps`/`Dynamic`
 wrappers.
 
+### Scalar conversions (enum, number, string)
+
+There are no separate "enum codecs" or "string number codecs": every combination
+is built from the same two combinators, so it composes with fields, lists,
+`dispatch`, optional fields and everything else.
+
+| JSON | C++ | How |
+| --- | --- | --- |
+| number | `enum class` | `Int.flatXmap<E>(toEnum, toInt)` (or `Int.xmap<E>` when the mapping is total) |
+| string | `enum class` | `codecs::stringEnum<E>({{"low", E::Low}, ...}, "E")`, or `String.flatXmap<E>` by hand |
+| string | number | `String.flatXmap<int32_t>(parse, toString)` — use `std::from_chars` for a strict parse |
+| number | `std::string` | `Int.xmap<std::string>(std::to_string, ...)` (the JSON stays a number) |
+| number *or* string | number | `either(Int, String).flatXmap<int32_t>(...)` — accepts `8080` and `"8080"`, encodes the canonical number |
+
+`test/unit/string_and_enum_test.cpp` is the runnable cookbook for all five rows,
+including the error messages (`Unknown Severity: "fatal"`, `Not a number: "80x"`)
+and how `optionalFieldOf` treats a `null` or invalid enum name.
+
 ## 4. The reference use case
 
 `models/risk_def.hpp` models the risk-definition document, including its
@@ -300,7 +318,7 @@ pin these down:
   lists (`["bob",42,["a"],["c","z"]]`), with `KeyCompressor` deriving the index
   order from `MapCodec::keys`.
 
-Intentional deviations, all documented in the headers:
+Intentional deviations and additions, all documented in the headers:
 
 | Area | DFU | Port | Why |
 | --- | --- | --- | --- |
@@ -311,14 +329,16 @@ Intentional deviations, all documented in the headers:
 | `CompressedMapLike` out-of-range index | `IndexOutOfBoundsException` | treated as absent | no exceptions in the decode path |
 | `Encoder.error(msg)` | appends the value's `toString` | uses the message verbatim | C++ has no universal `toString` |
 | `Codec.optionalFieldOf(name, Lifecycle, …)` | 4-argument overload | not ported | rarely used; `.stable()` covers it |
+| `codec::recursive<A>(supplier)` *(addition)* | — (Java expresses recursion through the datafixer graphs) | provided | resolves the supplier on first use, which also breaks the static-initialisation cycle |
+| `codecs::stringEnum<E>(table, name)` *(addition)* | — (Minecraft uses `StringRepresentable.fromEnum`, which is not in DFU) | provided | name-table enums without boilerplate; implemented with `flatXmap`, so it composes like any other codec |
 
 ## 6. Test layers
 
-142 GoogleTest cases in three independent executables. `ctest` prefixes each case
+151 GoogleTest cases in three independent executables. `ctest` prefixes each case
 with its layer (`unit.*`, `smoke.*`, `perf.*`), so any layer can be selected as a
 group.
 
-**`test/unit/` → `codec_unit_tests` (118 cases)** — component level, exhaustive
+**`test/unit/` → `codec_unit_tests` (127 cases)** — component level, exhaustive
 on edge cases:
 
 | File | Focus |
@@ -331,6 +351,7 @@ on edge cases:
 | `codec_combinators_test.cpp` | `xmap`/`flatXmap`/`comapFlatMap`/`flatComapMap`, `orElse`, `mapResult`, `either`, `pair`, `listOf`, `unboundedMap`, ranges, unit codecs, map-codec combinators |
 | `record_codec_test.cpp` | `record<>` in all forms, `fieldOf`/`optionalFieldOf`/`forGetter`, error joining, partial objects, keys, compression |
 | `dispatch_test.cpp` | `KeyDispatchCodec` (`partialDispatch`/`dispatch`/`dispatchMap`), map-codec payload merging, compressed dispatch |
+| `string_and_enum_test.cpp` | the scalar-conversion cookbook: number↔enum, string↔enum (incl. `codecs::stringEnum`), string↔number, number-or-string via `either`, enums in records/lists/optional fields |
 | `odr_test.cpp` + `odr_probe.cpp` | header-only guarantee: two TUs including the single header link together, and the inline singletons have one shared address |
 | `header_self_contained_test.cpp` | includes `codec.hpp` before every other header, proving the single header stands alone |
 
