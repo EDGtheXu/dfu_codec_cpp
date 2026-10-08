@@ -5,7 +5,7 @@
 （2 风险 codec 解码 15 423 ns vs 基线 15 500 ns）；阶段 3 的复测见 §4.3
 （隔离解码指标在**代码布局噪声**内，`unboundedMap` 成功路径的多余分配已修掉），
 验收后按 §4.4 修掉了 TOML 编码的 O(N²)（400 项 248 ms → 4.2 ms，线性）。
-202/202 测试在 Release（MSVC 14.50）与 Debug（MSVC 14.44）下全绿。
+203/203 测试在 Release（MSVC 14.50）与 Debug（MSVC 14.44）下全绿。
 分支：`generic-ops`（`zh-cn` 未受影响）。原型代码在 [`prototype/`](../prototype)：
 **设计实验，不是库的一部分**，阶段 4 收尾后应删除。
 
@@ -292,6 +292,21 @@ encode / dumpToml / 双向 convertTo 与 `per-risk encode`。它**单独一个�
 ——§4.3 已经量出代码布局能移动数字 ±3 %。若编码再退回通用构造器，这里会以 `per-risk encode`
 从 ~20 µs/risk 跳到 ~550 µs/risk 的形式直接暴露。
 
+### 4.5 拆分前的准备：通用累加器里的 JSON 假设
+
+在做"每格式一个头"之前先修了一个潜伏缺陷：`UniversalRecordBuilder::add`（通用累加器，
+"没有自带构造器的 ops"的回退路径）用 `key.as<JsonValue::Raw>()` 取键名来给编码错误加位置。
+对 JSON 键没问题，但对任何别的格式都只会拿到 `nullptr`，于是**错误位置被静默丢掉**。
+TOML 之所以没暴露它，只是因为 `TomlOps` 恰好覆写了 `mapBuilder`。
+
+修法：通过 ops 问（`isStringKey(key)` + `getStringValue(key)`），并把 `add` 改成类外定义
+（`UniversalRecordBuilder` 定义在 `DynamicOps` 之前，类内调用 ops 成员会撞上不完整类型）。
+
+回归测试放在 `toml_ops_test.cpp`（`UniversalRecordBuilderAsksTheOpsForKeyNames`）：直接用
+`TomlOps::INSTANCE` 驱动通用累加器，断言错误仍带 `severity` 位置、非字符串键不加位置。
+**该用例已用临时改回旧实现的方式验证过**：旧实现下 `location()` 为空、`describe()` 丢掉
+`severity: ` 前缀，用例变红；改回新实现后通过——即这条用例真的能抓住这类回归。
+
 ## 5. 阶段 1–4（每阶段门禁：全绿 + perf 复测）
 
 改动面（按段量化，`JsonValue` 出现次数）：
@@ -306,7 +321,7 @@ encode / dumpToml / 双向 convertTo 与 `per-risk encode`。它**单独一个�
 | --- | --- | --- | --- |
 | 1 | 4–5 段 + 6–8 段改签名；`JsonOps` 装箱/拆箱；`JsonValue` 公开 API 不变 | 174 + perf ≤5 % | **完成**（174/174；绝对性能持平，见 §4.2） |
 | 2 | `Passthrough` → `Codec<Dynamic>`；`models/risk_def.hpp` 的 `value` 成员跟进；`Dynamic` 类型落地 | 全绿 | **完成**（181/181；`Passthrough` 严格照 `Codec.java:197-224`；新增 `test/unit/dynamic_test.cpp` 7 个用例；头文件里 `value.asJson()` 调用点 43 → **0**） |
-| 3 | `TomlOps`（[tinytoml](https://github.com/mayah/tinytoml) v0.4，用户指定）实现 ops；「同一 codec 吃 JSON/TOML → 同结构」交叉用例；`convertTo` 变成真转换；通用代码里最后两处 JSON 假设改成 ops 级钩子；TOML 侧 mutable 构造器（修掉验收发现的 O(N²) 编码） | 新增用例 | **完成**（202/202；新增 `include/codec_toml.hpp` + 14 个 unit + 4 个 smoke + 3 个 perf 用例；`CODEC_BUILD_TOML` 可选层；`getMap` 改纯虚、新增 `isStringKey` 钩子、通用 `UniversalListBuilder`；性能见 §4.3、§4.4） |
+| 3 | `TomlOps`（[tinytoml](https://github.com/mayah/tinytoml) v0.4，用户指定）实现 ops；「同一 codec 吃 JSON/TOML → 同结构」交叉用例；`convertTo` 变成真转换；通用代码里最后两处 JSON 假设改成 ops 级钩子；TOML 侧 mutable 构造器（修掉验收发现的 O(N²) 编码） | 新增用例 | **完成**（203/203；新增 `include/codec_toml.hpp` + 15 个 unit + 4 个 smoke + 3 个 perf 用例；`CODEC_BUILD_TOML` 可选层；`getMap` 改纯虚、新增 `isStringKey` 钩子、通用 `UniversalListBuilder`；性能见 §4.3、§4.4，另修掉通用累加器的 JSON 假设见 §4.5） |
 | 4 | 文档：格式支持矩阵、§7 性能重测、删除原型与本文档的实验章节 | — | 待做 |
 
 阶段 1 实际做出来时比原计划多做了 6–8 段（原本排在阶段 2），并顺带补了两件今天缺的东西：

@@ -16,7 +16,7 @@ the port's provenance can be reproduced.
 
 * Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~5 000 lines, CMake `INTERFACE` target, nothing to build
 * Comments inside the header are written in **Chinese**; API names, error messages, test names and both READMEs stay English
-* Layered tests: [`test/unit/`](test/unit) (155 cases), [`test/smoke/`](test/smoke) (23 cases), [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) and the optional TOML layer (14 + 4 + 3 cases, 202 in total) — one executable each
+* Layered tests: [`test/unit/`](test/unit) (155 cases), [`test/smoke/`](test/smoke) (23 cases), [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) and the optional TOML layer (15 + 4 + 3 cases, 203 in total) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -72,7 +72,7 @@ Or drive CMake directly:
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # all layers, 202 cases
+ctest --test-dir build --output-on-failure   # all layers, 203 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
 
@@ -630,7 +630,7 @@ Intentional deviations and additions, all documented in the headers:
 
 ## 6. Test layers
 
-202 GoogleTest cases in six independent executables. `ctest` prefixes each case
+203 GoogleTest cases in six independent executables. `ctest` prefixes each case
 with its layer (`unit.*`, `smoke.*`, `perf.*`, `toml_unit.*`, `toml_smoke.*`,
 `toml_perf.*`), so any layer can be selected as a group.
 
@@ -677,7 +677,7 @@ the core layers stay free of the tinytoml dependency):
 
 | File | Focus |
 | --- | --- |
-| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests` (14 cases) | `TomlOps` as a `DynamicOps`: scalar reads by type, `BooleanIsNotANumber`, dates as strings, literal `"a.b"` keys via `findChild`, type-strict equality, `convertTo` both ways (and same-ops identity), `dumpToml` rejecting non-table roots / `null` / mixed arrays, parse errors carrying `line 2`, the v0.4 limits (dotted keys, mixed arrays, local time), empty document, list/map merging with strict keys, and the encoding builders (`TomlListBuilder`/`TomlRecordBuilder`): prefix merging without mutating the prefix, accumulator reuse, last-wins on duplicate keys, error propagation through `add`/`withErrorsFrom`/`mapError`, non-string keys, foreign (JSON) handles |
+| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests` (15 cases) | `TomlOps` as a `DynamicOps`: scalar reads by type, `BooleanIsNotANumber`, dates as strings, literal `"a.b"` keys via `findChild`, type-strict equality, `convertTo` both ways (and same-ops identity), `dumpToml` rejecting non-table roots / `null` / mixed arrays, parse errors carrying `line 2`, the v0.4 limits (dotted keys, mixed arrays, local time), empty document, list/map merging with strict keys, and the encoding builders (`TomlListBuilder`/`TomlRecordBuilder`): prefix merging without mutating the prefix, accumulator reuse, last-wins on duplicate keys, error propagation through `add`/`withErrorsFrom`/`mapError`, non-string keys, foreign (JSON) handles |
 | `smoke/toml_risk_def_test.cpp` → `codec_toml_smoke_tests` (4 cases) | the *same* `RiskDocumentCodec` on TOML and JSON (identical decoded values), dump → reparse stability, a `Passthrough` `Dynamic` moving JSON → TOML → JSON, TOML values converted back to JSON |
 | `perf/toml_perf_test.cpp` → `codec_toml_perf_tests` (3 cases) | the TOML layer's cost: `parseToml`, parse + decode, pre-parsed decode, encode, encode + `dumpToml`, both `convertTo` directions, and `per-risk encode` — the guard against encoding sliding back to the generic builders (see §7) |
 

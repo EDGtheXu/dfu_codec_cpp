@@ -336,4 +336,26 @@ TEST(TomlOpsTest, BuildersReportErrorsLikeJsonOps) {
   EXPECT_NE(foreignRecord.message().find("non-TOML value"), std::string::npos);
 }
 
+// 通用累加器（UniversalRecordBuilder）是"没有自带构造器的 ops"的回退路径。
+// 它不能假设键是 JSON 节点：这里用 TomlOps 直接驱动它，验证编码失败仍然带上
+// 键名作为位置——旧实现嗅探 key.as<JsonValue::Raw>()，对 TOML 键只会拿到
+// nullptr，于是错误位置被静默丢掉，这个用例会失败。
+TEST(TomlOpsTest, UniversalRecordBuilderAsksTheOpsForKeyNames) {
+  codec::UniversalRecordBuilder builder(TomlOps::INSTANCE);
+  builder.add(TomlOps::INSTANCE.createString("severity"),
+              DataResult<Value>::error("unmapped severity"));
+  const DataResult<Value> built = builder.build(TomlOps::INSTANCE.empty());
+  ASSERT_TRUE(built.isError());
+  EXPECT_EQ(built.location(), "severity");
+  EXPECT_EQ(built.describe(), "severity: unmapped severity");
+
+  // 非字符串键：ops 说不算键名，于是不加位置（与 JSON 侧的严格判定一致）。
+  codec::UniversalRecordBuilder numberKey(TomlOps::INSTANCE);
+  numberKey.add(TomlOps::INSTANCE.createInt(1), DataResult<Value>::error("boom"));
+  const DataResult<Value> builtNumberKey = numberKey.build(TomlOps::INSTANCE.empty());
+  ASSERT_TRUE(builtNumberKey.isError());
+  EXPECT_EQ(builtNumberKey.location(), "");
+  EXPECT_EQ(builtNumberKey.message(), "boom");
+}
+
 }  // namespace

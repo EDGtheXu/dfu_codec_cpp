@@ -2035,20 +2035,9 @@ class UniversalRecordBuilder
     return *this;
   }
 
-  RecordBuilder& add(const Value& key, const DataResult<Value>& value) override {
-    // 键名用于给编码错误加位置，所以要先拆回 JSON 视图。
-    const JsonValue::Raw* keyNode = key.as<JsonValue::Raw>();
-    builder_ = builder_.apply2stable(
-        [key](const State& state, const Value& element) {
-          state->emplace_back(key, element);
-          return state;
-        },
-        // 编码失败会携带其来源成员：`severity: Unmapped E value`。
-        (keyNode != nullptr && keyNode->is_string())
-            ? value.addPath(keyNode->get_ref<const std::string&>())
-            : value);
-    return *this;
-  }
+  // 注意：定义在类外（DynamicOps 完整定义之后）。键名要通过 ops 问出来，
+  // 而这个类必须排在 DynamicOps 之前，所以方法体不能写在类里。
+  RecordBuilder& add(const Value& key, const DataResult<Value>& value) override;
 
   RecordBuilder& add(const DataResult<Value>& key, const DataResult<Value>& value) override {
     const auto entry = key.apply2stable(
@@ -2452,6 +2441,28 @@ inline DataResult<Value> UniversalListBuilder::build(const Value& prefix) {
 inline DataResult<Value> UniversalRecordBuilder::buildState(const State& state,
                                                                 const Value& prefix) {
   return ops_->mergeToMap(prefix, *state);
+}
+
+// 键名用于给编码错误加位置。**必须通过 ops 问**，不能假设键是 JSON 节点：
+// 这个构造器是"没有自带累加器的 ops"的通用回退，一旦在这里嗅探
+// JsonValue::Raw，别的格式就会静默丢掉错误位置（toml_ops_test 里直接用
+// UniversalRecordBuilder + TomlOps 的用例就是钉这件事）。
+inline RecordBuilder& UniversalRecordBuilder::add(const Value& key, const DataResult<Value>& value) {
+  DataResult<Value> located = value;
+  if (ops_->isStringKey(key)) {
+    const DataResult<std::string> keyText = ops_->getStringValue(key);
+    if (keyText.result().has_value()) {
+      located = value.addPath(*keyText.result());
+    }
+  }
+  builder_ = builder_.apply2stable(
+      [key](const State& state, const Value& element) {
+        state->emplace_back(key, element);
+        return state;
+      },
+      // 编码失败会携带其来源成员：`severity: Unmapped E value`。
+      located);
+  return *this;
 }
 
 inline DataResult<Value> StringRecordBuilder::buildState(const State& state,

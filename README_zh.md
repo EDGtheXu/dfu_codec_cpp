@@ -16,9 +16,9 @@
 * 分层测试：[`test/unit/`](test/unit)（155 个用例）、[`test/smoke/`](test/smoke)
   （23 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
   性能对比）、以及可选的 TOML 层（[`test/unit/toml_ops_test.cpp`](test/unit/toml_ops_test.cpp)
-  14 个 + [`test/smoke/toml_risk_def_test.cpp`](test/smoke/toml_risk_def_test.cpp)
+  15 个 + [`test/smoke/toml_risk_def_test.cpp`](test/smoke/toml_risk_def_test.cpp)
   4 个 + [`test/perf/toml_perf_test.cpp`](test/perf/toml_perf_test.cpp) 3 个用例，
-  共 202 个）——每层一个独立可执行文件
+  共 203 个）——每层一个独立可执行文件
 * 参考用例（风险定义文档）：[`models/risk_def.hpp`](models/risk_def.hpp)
 * 可运行示例：[`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -73,7 +73,7 @@ powershell -File scripts/build.ps1 -RunTests
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 全部测试层，202 个用例
+ctest --test-dir build --output-on-failure   # 全部测试层，203 个用例
 cmake --build build --target check           # 等价的一键目标
 build/examples/risk_def_example.exe          # 可选：示例文档演示
 
@@ -582,7 +582,7 @@ Codec<Condition> conditionCodec() {
 
 ## 6. 测试分层
 
-202 个 GoogleTest 用例分布在六个独立可执行文件中。`ctest` 会为每个用例加上所属层的
+203 个 GoogleTest 用例分布在六个独立可执行文件中。`ctest` 会为每个用例加上所属层的
 前缀（`unit.*`、`smoke.*`、`perf.*`、`toml_unit.*`、`toml_smoke.*`、`toml_perf.*`），
 因此任何一层都可以按组选择运行。
 
@@ -628,7 +628,7 @@ Codec<Condition> conditionCodec() {
 
 | 文件 | 关注点 |
 | --- | --- |
-| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests`（14 个用例） | 把 `TomlOps` 当作 `DynamicOps` 来用：按类型读取标量、`BooleanIsNotANumber`、时间按字符串读、字面键 `"a.b"` 走 `findChild`、类型严格的相等、`convertTo` 双向（以及同 ops 恒等）、`dumpToml` 拒绝非表根 / `null` / 混型数组、解析错误带 `line 2`、v0.4 的边界（点号键、混型数组、本地时间）、空文档、严格键的列表/表合并；以及编码用的构造器（`TomlListBuilder`/`TomlRecordBuilder`）：并入前缀而不改动前缀、累加器复用、重复键 last-wins、`add`/`withErrorsFrom`/`mapError` 的错误传播、非字符串键、混进来的 JSON 句柄 |
+| `unit/toml_ops_test.cpp` → `codec_toml_unit_tests`（15 个用例） | 把 `TomlOps` 当作 `DynamicOps` 来用：按类型读取标量、`BooleanIsNotANumber`、时间按字符串读、字面键 `"a.b"` 走 `findChild`、类型严格的相等、`convertTo` 双向（以及同 ops 恒等）、`dumpToml` 拒绝非表根 / `null` / 混型数组、解析错误带 `line 2`、v0.4 的边界（点号键、混型数组、本地时间）、空文档、严格键的列表/表合并；以及编码用的构造器（`TomlListBuilder`/`TomlRecordBuilder`）：并入前缀而不改动前缀、累加器复用、重复键 last-wins、`add`/`withErrorsFrom`/`mapError` 的错误传播、非字符串键、混进来的 JSON 句柄 |
 | `smoke/toml_risk_def_test.cpp` → `codec_toml_smoke_tests`（4 个用例） | **同一个** `RiskDocumentCodec` 同时吃 TOML 与 JSON（解出的结构完全相同）、dump → 重新解析稳定、`Passthrough` 的 `Dynamic` 从 JSON 搬到 TOML 再搬回来、TOML 值转回 JSON |
 | `perf/toml_perf_test.cpp` → `codec_toml_perf_tests`（3 个用例） | TOML 层的代价：`parseToml`、解析+解码、已解析解码、编码、编码+`dumpToml`、双向 `convertTo`，以及 `per-risk encode`——防止编码重新退回通用构造器的可见性守卫（见 §7） |
 
