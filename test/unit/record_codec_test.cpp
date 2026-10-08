@@ -8,6 +8,7 @@ using codec::Codec;
 using codec::DataResult;
 using codec::JsonOps;
 using codec::JsonValue;
+using codec::Value;
 using codec::MapCodec;
 using codec::RecordBuilder;
 using codec::codecs::Int;
@@ -186,15 +187,15 @@ TEST(RecordCodecTest, OptionalNestedRecordsSwallowTheElementError) {
 }
 
 TEST(RecordCodecTest, FieldKeysAreReportedForCompression) {
-  const std::vector<JsonValue> keys = personCodec().keys(JsonOps::INSTANCE);
+  const std::vector<Value> keys = personCodec().keys(JsonOps::INSTANCE);
   // MapCodec.keys concatenates the encoder and decoder key streams.
   EXPECT_EQ(keys.size(), 8u);
-  EXPECT_EQ(keys[0].dump(), "\"name\"");
-  EXPECT_EQ(keys[3].dump(), "\"address\"");
+  EXPECT_EQ(keys[0].asJson().dump(), "\"name\"");
+  EXPECT_EQ(keys[3].asJson().dump(), "\"address\"");
   std::vector<std::string> unique;
-  for (const JsonValue& key : keys) {
-    if (std::find(unique.begin(), unique.end(), key.dump()) == unique.end()) {
-      unique.push_back(key.dump());
+  for (const Value& key : keys) {
+    if (std::find(unique.begin(), unique.end(), key.asJson().dump()) == unique.end()) {
+      unique.push_back(key.asJson().dump());
     }
   }
   EXPECT_EQ(unique.size(), 4u);
@@ -212,7 +213,7 @@ TEST(RecordCodecTest, EncodeFailuresAreCollectedByTheBuilder) {
   const Codec<Immutable> codec = record<Immutable>(
       [](std::string name, int32_t age) { return Immutable(std::move(name), age); },
       fieldOf("name", &Immutable::name, String), fieldOf("age", &Immutable::age, bounded));
-  const DataResult<JsonValue> result = codec.encodeStart(JsonOps::INSTANCE, Immutable("n", 200));
+  const DataResult<Value> result = codec.encodeStart(JsonOps::INSTANCE, Immutable("n", 200));
   ASSERT_TRUE(result.isError());
   EXPECT_EQ(result.message(), "too large: 200");
 }
@@ -229,11 +230,11 @@ TEST(RecordCodecTest, EmptyRecordWithNoFields) {
 
 TEST(RecordCodecTest, CompressedRecordRoundTripsThroughAKeyList) {
   const Person person{"bob", 42, {"a"}, Address{"c", "z"}};
-  const DataResult<JsonValue> encoded = personCodec().codec().encodeStart(JsonOps::COMPRESSED, person);
+  const DataResult<Value> encoded = personCodec().codec().encodeStart(JsonOps::COMPRESSED, person);
   ASSERT_TRUE(encoded.result().has_value());
   // Keys are [name, age, tags, address]; optional members that are present fill
   // their slot, absent ones stay null.
-  EXPECT_EQ(encoded.result()->dump(), R"(["bob",42,["a"],["c","z"]])");
+  EXPECT_EQ(encoded.result()->asJson().dump(), R"(["bob",42,["a"],["c","z"]])");
   EXPECT_EQ(decode(personCodec().codec(), R"(["bob",42,["a"],["c","z"]])", JsonOps::COMPRESSED),
             person);
   EXPECT_EQ(decode(personCodec().codec(), R"(["bob",42,["a"],null])", JsonOps::COMPRESSED).address,

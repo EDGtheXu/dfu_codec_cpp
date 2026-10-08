@@ -5,6 +5,7 @@ namespace {
 
 using codec::JsonParseError;
 using codec::JsonValue;
+using codec::Value;
 using codec::Number;
 
 TEST(JsonValueTest, ParsesScalars) {

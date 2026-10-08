@@ -12,6 +12,7 @@ using codec::Codec;
 using codec::DataResult;
 using codec::JsonOps;
 using codec::JsonValue;
+using codec::Value;
 using risk::Condition;
 using risk::RiskDef;
 using risk::RiskDocument;
@@ -117,7 +118,7 @@ TEST(RiskDefTest, MissingRequiredFieldsAreReportedTogether) {
   JsonValue::Array risks = document[0].second.asArray();
   JsonValue::Object first = risks[0].asObject();
   first.erase(std::remove_if(first.begin(), first.end(),
-                             [](const std::pair<std::string, JsonValue>& member) {
+                             [](const std::pair<std::string, Value>& member) {
                                return member.first == "severity" || member.first == "solution";
                              }),
               first.end());

@@ -34,10 +34,10 @@ TEST(HeaderSelfContainedTest, CompilesAndWorksWithOnlyTheSingleHeader) {
   ASSERT_TRUE(decoded.result().has_value()) << decoded.message();
   EXPECT_EQ(*decoded.result(), (Named{"a", 2}));
 
-  const codec::DataResult<codec::JsonValue> encoded =
+  const codec::DataResult<codec::Value> encoded =
       namedCodec().encodeStart(codec::JsonOps::INSTANCE, *decoded.result());
   ASSERT_TRUE(encoded.result().has_value()) << encoded.message();
-  EXPECT_EQ(encoded.result()->dump(), R"({"name":"a","count":2})");
+  EXPECT_EQ(encoded.result()->asJson().dump(), R"({"name":"a","count":2})");
 
   // The error path works too, without any test-helper machinery.
   const codec::DataResult<Named> failed = namedCodec().parse(

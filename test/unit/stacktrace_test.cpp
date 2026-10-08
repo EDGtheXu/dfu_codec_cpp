@@ -29,6 +29,7 @@ using codec::Codec;
 using codec::DataResult;
 using codec::JsonOps;
 using codec::JsonValue;
+using codec::Value;
 
 // 开关打开但标准库没有 <stacktrace> 时，这里会明确报错，而不是静默失去栈。
 TEST(StacktraceTest, FeatureDetectionMatchesTheBuild) {

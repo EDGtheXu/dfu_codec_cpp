@@ -26,6 +26,7 @@ using codec::DataResult;
 using codec::Either;
 using codec::JsonOps;
 using codec::JsonValue;
+using codec::Value;
 using codec::codecs::Int;
 using codec::codecs::String;
 
@@ -139,8 +140,8 @@ DataResult<A> decode(const Codec<A>& codec, const std::string& text) {
 
 template <class A>
 std::string encode(const Codec<A>& codec, const typename Codec<A>::value_type& value) {
-  const DataResult<JsonValue> encoded = codec.encodeStart(JsonOps::INSTANCE, value);
-  return encoded.result().has_value() ? encoded.result()->dump() : "error: " + encoded.message();
+  const DataResult<Value> encoded = codec.encodeStart(JsonOps::INSTANCE, value);
+  return encoded.result().has_value() ? encoded.result()->asJson().dump() : "error: " + encoded.message();
 }
 
 TEST(NumberToEnumTest, JsonNumberDecodesIntoAnEnumClass) {
@@ -166,7 +167,7 @@ TEST(StringToEnumTest, JsonStringDecodesIntoAnEnumClass) {
   ASSERT_TRUE(unknown.isError());
   EXPECT_EQ(unknown.message(), "Unknown Severity: \"fatal\"");
 
-  const DataResult<JsonValue> unmapped =
+  const DataResult<Value> unmapped =
       severityCodec().encodeStart(JsonOps::INSTANCE, static_cast<Severity>(99));
   ASSERT_TRUE(unmapped.isError());
   EXPECT_EQ(unmapped.message(), "Unmapped Severity value");

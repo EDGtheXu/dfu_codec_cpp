@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
   using codec::DataResult;
   using codec::JsonOps;
   using codec::JsonValue;
+  using codec::Value;
 
   try {
     const std::string text = argc > 1 ? readFile(argv[1]) : std::string(risk::kSampleRiskJson());
@@ -114,14 +115,14 @@ int main(int argc, char** argv) {
       }
     }
 
-    const DataResult<JsonValue> encoded = codec.encodeStart(JsonOps::INSTANCE, document);
+    const DataResult<Value> encoded = codec.encodeStart(JsonOps::INSTANCE, document);
     if (encoded.isError()) {
       std::cerr << "encode failed:\n" << encoded.report() << "\n";
       return 1;
     }
-    std::cout << "\nre-encoded:\n" << encoded.result()->dump(true, 2) << "\n";
+    std::cout << "\nre-encoded:\n" << encoded.result()->asJson().dump(true, 2) << "\n";
     std::cout << "\nround-trip identical to input: "
-              << (encoded.result()->dump() == input.dump() ? "yes" : "no") << "\n";
+              << (encoded.result()->asJson().dump() == input.dump() ? "yes" : "no") << "\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "error: " << error.what() << "\n";

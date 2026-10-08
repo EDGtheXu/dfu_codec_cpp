@@ -22,7 +22,8 @@
 //
 //     DataResult<RiskDef> decoded = riskDefCodec.parse(JsonOps::INSTANCE,
 //                                                       JsonValue::parse(text));
-//     DataResult<JsonValue> encoded = riskDefCodec.encodeStart(JsonOps::INSTANCE, value);
+//     DataResult<Value> encoded = riskDefCodec.encodeStart(JsonOps::INSTANCE, value);
+//     // Value 是 ops 层格式无关的值句柄；配 JsonOps 时 value.asJson() 取出 JSON 节点
 //
 // 依赖
 // ------------
@@ -264,6 +265,11 @@ class JsonParseError : public std::runtime_error {
 // 复制句柄、读取成员或遍历数组都是 O(1)，且从不
 // 复制 DOM。值一旦构建完成即不可变。
 // ---------------------------------------------------------------------------
+
+// 类型擦除的值句柄在下面定义（第 4 段 dynamic_ops）。这里先声明，好让
+// JsonValue 能提供与它互操作的入口（ownerHandle / nodeHandle / toValue）。
+struct Value;
+
 class JsonValue {
  public:
   enum class Type { Null, Boolean, Number, String, Array, Object };
@@ -328,6 +334,15 @@ class JsonValue {
   std::string dump(bool pretty = false, int indent = 2) const;
   std::string typeName() const { return std::string(node_->type_name()); }
 
+  // --- 与擦除句柄 Value 互操作（阶段 1 新增） -----------------------------
+  //
+  // 交出「所有者 + 节点」这一对：Value 的布局与 JsonValue 完全相同，
+  // 因此装箱只是复制 shared_ptr（一次原子加一），既不分配也不复制 DOM。
+  std::shared_ptr<const void> ownerHandle() const { return owner_; }
+  const void* nodeHandle() const { return node_; }
+  // 等价于 Value(*this)（隐式转换），显式写法更好读。
+  Value toValue() const;
+
   // 深度相等。对象比较不区分顺序，数值比较则与
   // Gson 的 JsonPrimitive 一致（42 == 42.0）。
   bool equals(const JsonValue& other) const;
@@ -347,6 +362,91 @@ inline const std::shared_ptr<const nlohmann::ordered_json>& nullNodeOwner() {
       std::make_shared<const nlohmann::ordered_json>();
   return owner;
 }
+}  // namespace detail
+
+namespace detail {
+
+// JsonValue::asNumber() 的取值规则（整数 / 无符号 / 浮点），节点级实现：
+// 供 JsonOps 与节点级比较复用，避免临时构造 JsonValue 句柄。
+inline Number numberOf(const JsonValue::Raw& node) {
+  if (node.is_number_integer()) {
+    return Number::ofInt(node.get<int64_t>());
+  }
+  if (node.is_number_unsigned()) {
+    const uint64_t unsignedValue = node.get<uint64_t>();
+    if (unsignedValue <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      return Number::ofInt(static_cast<int64_t>(unsignedValue));
+    }
+    return Number::ofDouble(static_cast<double>(unsignedValue));
+  }
+  return Number::ofDouble(node.get<double>());
+}
+
+// 节点级深度相等：与 JsonValue::equals 的语义逐字对应（类型严格、
+// 数值按 Gson 的 JsonPrimitive 规则、对象不区分顺序），但不构造任何句柄，
+// 因此没有引用计数开销。
+inline bool jsonNodesEqual(const JsonValue::Raw& left, const JsonValue::Raw& right) {
+  const auto kind = [](const JsonValue::Raw& node) {
+    switch (node.type()) {
+      case JsonValue::Raw::value_t::boolean:
+        return JsonValue::Type::Boolean;
+      case JsonValue::Raw::value_t::number_integer:
+      case JsonValue::Raw::value_t::number_unsigned:
+      case JsonValue::Raw::value_t::number_float:
+        return JsonValue::Type::Number;
+      case JsonValue::Raw::value_t::string:
+        return JsonValue::Type::String;
+      case JsonValue::Raw::value_t::array:
+        return JsonValue::Type::Array;
+      case JsonValue::Raw::value_t::object:
+        return JsonValue::Type::Object;
+      case JsonValue::Raw::value_t::null:
+      case JsonValue::Raw::value_t::discarded:
+      case JsonValue::Raw::value_t::binary:
+        return JsonValue::Type::Null;
+    }
+    return JsonValue::Type::Null;
+  };
+  const JsonValue::Type type = kind(left);
+  if (type != kind(right)) {
+    return false;
+  }
+  switch (type) {
+    case JsonValue::Type::Null:
+      return true;
+    case JsonValue::Type::Boolean:
+      return left.get<bool>() == right.get<bool>();
+    case JsonValue::Type::Number:
+      return numberOf(left).equals(numberOf(right));
+    case JsonValue::Type::String:
+      return left.get_ref<const std::string&>() == right.get_ref<const std::string&>();
+    case JsonValue::Type::Array: {
+      if (left.size() != right.size()) {
+        return false;
+      }
+      for (size_t i = 0; i < left.size(); ++i) {
+        if (!jsonNodesEqual(left[i], right[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case JsonValue::Type::Object: {
+      if (left.size() != right.size()) {
+        return false;
+      }
+      for (auto it = left.begin(); it != left.end(); ++it) {
+        const auto theirs = right.find(it.key());
+        if (theirs == right.end() || !jsonNodesEqual(it.value(), theirs.value())) {
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace detail
 
 inline JsonValue::JsonValue()
@@ -430,17 +530,7 @@ inline Number JsonValue::asNumber() const {
   if (!isNumber()) {
     throw std::runtime_error("JsonValue is not a number: " + dump());
   }
-  if (node_->is_number_integer()) {
-    return Number::ofInt(node_->get<int64_t>());
-  }
-  if (node_->is_number_unsigned()) {
-    const uint64_t unsignedValue = node_->get<uint64_t>();
-    if (unsignedValue <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-      return Number::ofInt(static_cast<int64_t>(unsignedValue));
-    }
-    return Number::ofDouble(static_cast<double>(unsignedValue));
-  }
-  return Number::ofDouble(node_->get<double>());
+  return detail::numberOf(*node_);
 }
 
 inline const std::string& JsonValue::asString() const {
@@ -499,50 +589,8 @@ inline std::string JsonValue::dump(bool pretty, int indent) const {
 }
 
 inline bool JsonValue::equals(const JsonValue& other) const {
-  const Type kind = type();
-  if (kind != other.type()) {
-    return false;
-  }
-  switch (kind) {
-    case Type::Null:
-      return true;
-    case Type::Boolean:
-      return asBoolean() == other.asBoolean();
-    case Type::Number:
-      return asNumber().equals(other.asNumber());
-    case Type::String:
-      return asString() == other.asString();
-    case Type::Array: {
-      if (size() != other.size()) {
-        return false;
-      }
-      const Array mine = asArray();
-      const Array theirs = other.asArray();
-      for (size_t i = 0; i < mine.size(); ++i) {
-        if (!mine[i].equals(theirs[i])) {
-          return false;
-        }
-      }
-      return true;
-    }
-    case Type::Object: {
-      // 不区分顺序，与 Gson 的 JsonObject（LinkedTreeMap）相等性一致。
-      if (size() != other.size()) {
-        return false;
-      }
-      for (auto it = node_->begin(); it != node_->end(); ++it) {
-        const auto theirs = other.node_->find(it.key());
-        if (theirs == other.node_->end()) {
-          return false;
-        }
-        if (!JsonValue(owner_, &it.value()).equals(JsonValue(other.owner_, &theirs.value()))) {
-          return false;
-        }
-      }
-      return true;
-    }
-  }
-  return false;
+  // 语义与原先逐字一致，只是改为节点级比较（不构造句柄、不做引用计数）。
+  return type() == other.type() && detail::jsonNodesEqual(*node_, *other.node_);
 }
 
 inline bool JsonValue::equalsOrdered(const JsonValue& other) const {
@@ -1486,12 +1534,13 @@ struct Unit {
 // dynamic_ops.hpp -- DynamicOps、MapLike、RecordBuilder、ListBuilder、
 // KeyCompressor 与 Compressable 的移植。
 //
-// DFU 的 DynamicOps<T> 对序列化后的值类型（JsonElement、
-// NbtTag……）是泛型的。本移植只用一个统一的值类型（JsonValue），因此
-// 类型参数被消去，DynamicOps 变成面向 JsonValue 的抽象类。
-// JsonOps 是唯一随库提供的具体实现；由于值类型是统一的，
-// 这里的 DynamicOps::convertTo 是恒等变换，而在
-// DFU 中它会把 DOM 重写成目标 ops 的表示。
+// DFU 的 DynamicOps<T> 对序列化后的值类型（JsonElement、NbtTag……）是泛型的。
+// 这个移植不能在 codec 层做模板化（`std::function` 存不了泛型 lambda，而
+// Codec<A> 正是靠类型擦除才保持普通值类型），所以改为**擦除值类型**：
+// ops 接口收发 `Value`（见下面的 Value 句柄），具体格式由各个 ops 决定。
+// JsonOps 是当前唯一随库提供的实现（节点类型 JsonValue::Raw），因此
+// DynamicOps::convertTo 目前仍是恒等变换；接第二种 ops 时，它由源 ops
+// 递归遍历自己的 DOM、逐节点调用目标 ops 的 createX。
 
 
 
@@ -1503,9 +1552,114 @@ class KeyCompressor;
 
 using MapLikePtr = std::shared_ptr<const MapLike>;
 
+// ---------------------------------------------------------------------------
+// Value —— 类型擦除的值句柄（新增：支持多种序列化格式的基础）
+//
+// DFU 的 `DynamicOps<T>` 对值类型泛型，但 C++ 的 `std::function` 存不了泛型
+// lambda，而本移植正是靠类型擦除才让 `Codec<A>` 保持普通值类型（能放进容器、
+// 能当 dispatch 的返回值）。所以这里把「值类型」擦除掉：
+//
+//   * `owner` 与 JsonValue 用的是同一个 shared_ptr 所有者 ——
+//     装箱（JsonValue → Value）只复制所有者，不分配、不复制 DOM；
+//   * `node` 指向该 DOM 里的一个节点；
+//   * `tag` 是 `&tagOf<T>()`，比较是 O(1) 指针比较（不用 typeid ——
+//     MSVC 的 type_info::operator== 可能退化成名字串比较）。
+//
+// 具体的写法由各个 ops 决定：今天只有 JsonOps（节点类型 JsonValue::Raw），
+// 以后接 TOML/NBT 时只需再写一个 ops，codec 层不用改。
+// 设计记录与实测：docs/dynamic_ops_generic.md。
+// ---------------------------------------------------------------------------
+
+// 每个具体值类型一个稳定地址，作为它的身份标签。
+template <class T>
+const void* tagOf() {
+  static const int tag = 0;
+  return &tag;
+}
+
+struct Value {
+  std::shared_ptr<const void> owner;
+  const void* node = nullptr;
+  const void* tag = nullptr;
+
+  Value() = default;
+
+  // JsonValue → Value：非 explicit，于是 `codec.parse(JsonOps::INSTANCE,
+  // JsonValue::parse(text))` 这类既有写法不用改。
+  Value(const JsonValue& json)  // NOLINT(google-explicit-constructor)
+      : owner(json.ownerHandle()),
+        node(json.nodeHandle()),
+        tag(tagOf<JsonValue::Raw>()) {}
+
+  template <class T>
+  static Value of(std::shared_ptr<const void> owner, const T* node) {
+    return Value(std::move(owner), static_cast<const void*>(node), tagOf<T>());
+  }
+
+  // 按值 + move 的重载：shared_ptr<const T> → shared_ptr<const void> 走
+  // converting move，不产生任何引用计数操作（装箱零分配、零原子）。
+  template <class T>
+  static Value of(std::shared_ptr<const T> owner, const T* node) {
+    return Value(std::shared_ptr<const void>(std::move(owner)), static_cast<const void*>(node),
+                 tagOf<T>());
+  }
+
+  // 借用同一所有者、只换子节点：owner 按 const& 传入，构造时只做一次
+  // 引用计数拷贝——装箱子节点无法避免的那一次。
+  static Value ofChild(const std::shared_ptr<const void>& owner, const void* node,
+                       const void* tag) {
+    return Value(owner, node, tag);
+  }
+
+  template <class T>
+  bool is() const {
+    return tag == tagOf<T>();
+  }
+  // 标签不匹配时返回 nullptr（不是 UB）。
+  template <class T>
+  const T* as() const {
+    return is<T>() ? static_cast<const T*>(node) : nullptr;
+  }
+
+  bool valid() const { return node != nullptr; }
+  // 数据成员已经叫 `tag`，所以访问器用 typeTag() 这个名字。
+  const void* typeTag() const { return tag; }
+
+  // 取出 JSON 节点；标签不匹配时抛 std::logic_error。
+  // Phase 1 里 JsonOps 与 Passthrough 靠它读值，阶段 2 起由 Dynamic 承担。
+  JsonValue asJson() const {
+    const JsonValue::Raw* raw = as<JsonValue::Raw>();
+    if (raw == nullptr) {
+      throw std::logic_error("Value::asJson(): the handle does not hold a JSON node");
+    }
+    return JsonValue(std::static_pointer_cast<const JsonValue::Raw>(owner), raw);
+  }
+
+ private:
+  Value(std::shared_ptr<const void> owner, const void* node, const void* tag)
+      : owner(std::move(owner)), node(node), tag(tag) {}
+};
+
+inline Value JsonValue::toValue() const { return Value(*this); }
+
+
 // Gson 的 JsonObject.add：已存在的成员会被原地替换（该对象
 // 由 LinkedTreeMap 支撑），这正是 DFU 的 JsonOps 所依赖的行为。
-inline void putJsonMember(JsonValue::Object& members, const std::string& key, const JsonValue& value) {
+// 同一个语义，但直接作用于 nlohmann 节点：写路径（builder / mergeToMap）
+// 因此不必为每个成员构造 JsonValue 句柄。
+inline void putRawMember(JsonValue::Raw& object, const std::string& key,
+                         const JsonValue::Raw& value) {
+  for (auto it = object.begin(); it != object.end(); ++it) {
+    if (it.key() == key) {
+      it.value() = value;  // 原地替换，保持成员顺序
+      return;
+    }
+  }
+  object[key] = value;  // 新成员追加在末尾
+}
+
+inline void putJsonMember(JsonValue::Object& members, const std::string& key,
+                          const JsonValue& value) {
   for (auto& member : members) {
     if (member.first == key) {
       member.second = value;
@@ -1525,47 +1679,66 @@ class MapLike {
  public:
   virtual ~MapLike() = default;
 
-  virtual std::optional<JsonValue> get(const JsonValue& key) const = 0;
-  virtual std::optional<JsonValue> get(const std::string& key) const = 0;
-  virtual std::vector<std::pair<JsonValue, JsonValue>> entries() const = 0;
+  virtual std::optional<Value> get(const Value& key) const = 0;
+  virtual std::optional<Value> get(const std::string& key) const = 0;
+  virtual std::vector<std::pair<Value, Value>> entries() const = 0;
   virtual std::string toString() const = 0;
 };
 
 // 由 JsonValue 对象支撑的 MapLike（JsonOps.getMap）。
 class JsonObjectMapLike : public MapLike {
  public:
-  explicit JsonObjectMapLike(JsonValue object) : object_(std::move(object)) {}
+  explicit JsonObjectMapLike(JsonValue object)
+      : owner_(object.ownerHandle()), node_(&object.raw()) {}
+  JsonObjectMapLike(std::shared_ptr<const void> owner, const JsonValue::Raw* node)
+      : owner_(std::move(owner)), node_(node) {}
 
-  std::optional<JsonValue> get(const JsonValue& key) const override {
-    if (!key.isString()) {
+  std::optional<Value> get(const Value& keyHandle) const override {
+    // 只在节点上判断类型，不构造 JsonValue。
+    const JsonValue::Raw* key = keyHandle.as<JsonValue::Raw>();
+    if (key == nullptr || !key->is_string()) {
       return std::nullopt;
     }
-    return get(key.asString());
+    return get(key->get_ref<const std::string&>());
   }
 
-  std::optional<JsonValue> get(const std::string& key) const override {
-    // JsonValue::get 已经把显式的 JSON null 视为「缺失」。
-    return object_.get(key);
+  std::optional<Value> get(const std::string& key) const override {
+    // JsonValue::get 的语义：显式的 JSON null 视为「缺失」。
+    if (!node_->is_object()) {
+      return std::nullopt;
+    }
+    const auto it = node_->find(key);
+    if (it == node_->end() || it->is_null()) {
+      return std::nullopt;
+    }
+    return Value::ofChild(owner_, &it.value(), tagOf<JsonValue::Raw>());
   }
 
-  std::vector<std::pair<JsonValue, JsonValue>> entries() const override {
-    std::vector<std::pair<JsonValue, JsonValue>> out;
-    if (!object_.isObject()) {
+  std::vector<std::pair<Value, Value>> entries() const override {
+    std::vector<std::pair<Value, Value>> out;
+    if (!node_->is_object()) {
       return out;
     }
-    out.reserve(object_.size());
-    for (const auto& entry : object_.asObject()) {
-      out.emplace_back(JsonValue::string(entry.first), entry.second);
+    out.reserve(node_->size());
+    for (auto it = node_->begin(); it != node_->end(); ++it) {
+      // 键在 nlohmann 里是 std::string 而不是节点，因此装箱键要建一个节点；
+      // 值只借子节点（一次引用计数拷贝）。
+      out.emplace_back(Value(JsonValue::string(it.key())),
+                       Value::ofChild(owner_, &it.value(), tagOf<JsonValue::Raw>()));
     }
     return out;
   }
 
-  const JsonValue& object() const { return object_; }
+  // 兼容入口：需要 JsonValue 视图时按需构造（读路径不再走它）。
+  JsonValue object() const {
+    return JsonValue(std::static_pointer_cast<const JsonValue::Raw>(owner_), node_);
+  }
 
-  std::string toString() const override { return "MapLike[" + object_.dump() + "]"; }
+  std::string toString() const override { return "MapLike[" + node_->dump() + "]"; }
 
  private:
-  JsonValue object_;
+  std::shared_ptr<const void> owner_;
+  const JsonValue::Raw* node_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1576,9 +1749,9 @@ class JsonObjectMapLike : public MapLike {
 // ---------------------------------------------------------------------------
 class KeyCompressor {
  public:
-  KeyCompressor(const DynamicOps& ops, const std::vector<JsonValue>& keys);
+  KeyCompressor(const DynamicOps& ops, const std::vector<Value>& keys);
 
-  const JsonValue* decompress(int key) const {
+  const Value* decompress(int key) const {
     if (key < 0 || static_cast<size_t>(key) >= decompress_.size()) {
       return nullptr;
     }
@@ -1586,13 +1759,13 @@ class KeyCompressor {
   }
 
   int compress(const std::string& key) const;
-  int compress(const JsonValue& key) const;
+  int compress(const Value& key) const;
 
   int size() const { return static_cast<int>(decompress_.size()); }
 
  private:
   const DynamicOps* ops_;
-  std::vector<JsonValue> decompress_;
+  std::vector<Value> decompress_;
   std::unordered_map<std::string, int> compressByValue_;
   std::unordered_map<std::string, int> compressByString_;
 };
@@ -1601,24 +1774,25 @@ class KeyCompressor {
 // 下标寻址（DFU 中 MapDecoder.compressedDecode 里的匿名 MapLike）。
 class CompressedMapLike : public MapLike {
  public:
-  CompressedMapLike(const KeyCompressor& compressor, std::vector<JsonValue> entries)
+  CompressedMapLike(const KeyCompressor& compressor, std::vector<Value> entries)
       : compressor_(&compressor), entries_(std::move(entries)) {}
 
-  std::optional<JsonValue> get(const JsonValue& key) const override {
+  std::optional<Value> get(const Value& key) const override {
     const int index = compressor_->compress(key);
     return at(index);
   }
 
-  std::optional<JsonValue> get(const std::string& key) const override {
+  std::optional<Value> get(const std::string& key) const override {
     const int index = compressor_->compress(key);
     return at(index);
   }
 
-  std::vector<std::pair<JsonValue, JsonValue>> entries() const override {
-    std::vector<std::pair<JsonValue, JsonValue>> out;
+  std::vector<std::pair<Value, Value>> entries() const override {
+    std::vector<std::pair<Value, Value>> out;
     for (size_t i = 0; i < entries_.size(); ++i) {
-      const JsonValue* key = compressor_->decompress(static_cast<int>(i));
-      if (key == nullptr || entries_[i].isNull()) {
+      const Value* key = compressor_->decompress(static_cast<int>(i));
+      const JsonValue::Raw* value = entries_[i].as<JsonValue::Raw>();
+      if (key == nullptr || value == nullptr || value->is_null()) {
         continue;
       }
       out.emplace_back(*key, entries_[i]);
@@ -1634,25 +1808,29 @@ class CompressedMapLike : public MapLike {
         out += ", ";
       }
       first = false;
-      out += entry.first.dump() + "=" + entry.second.dump();
+      const JsonValue::Raw* keyNode = entry.first.as<JsonValue::Raw>();
+      const JsonValue::Raw* valueNode = entry.second.as<JsonValue::Raw>();
+      out += (keyNode != nullptr ? keyNode->dump() : std::string("?")) + "=" +
+             (valueNode != nullptr ? valueNode->dump() : std::string("?"));
     }
     return out + "]";
   }
 
  private:
-  std::optional<JsonValue> at(int index) const {
+  std::optional<Value> at(int index) const {
     if (index < 0 || static_cast<size_t>(index) >= entries_.size()) {
       return std::nullopt;
     }
-    const JsonValue& value = entries_[static_cast<size_t>(index)];
-    if (value.isNull()) {
+    const Value& value = entries_[static_cast<size_t>(index)];
+    const JsonValue::Raw* node = value.as<JsonValue::Raw>();
+    if (node == nullptr || node->is_null()) {
       return std::nullopt;
     }
     return value;
   }
 
   const KeyCompressor* compressor_;
-  std::vector<JsonValue> entries_;
+  std::vector<Value> entries_;
 };
 
 // ---------------------------------------------------------------------------
@@ -1663,14 +1841,14 @@ class ListBuilder {
   virtual ~ListBuilder() = default;
 
   virtual const DynamicOps& ops() const = 0;
-  virtual ListBuilder& add(const JsonValue& value) = 0;
-  virtual ListBuilder& add(const DataResult<JsonValue>& value) = 0;
+  virtual ListBuilder& add(const Value& value) = 0;
+  virtual ListBuilder& add(const DataResult<Value>& value) = 0;
   virtual ListBuilder& withErrorsFrom(const DataResultBase& result) = 0;
   virtual ListBuilder& mapError(const StringUnaryOperator& onError) = 0;
-  virtual DataResult<JsonValue> build(const JsonValue& prefix) = 0;
+  virtual DataResult<Value> build(const Value& prefix) = 0;
 
-  DataResult<JsonValue> build(const DataResult<JsonValue>& prefix) {
-    return prefix.flatMap([this](const JsonValue& value) { return build(value); });
+  DataResult<Value> build(const DataResult<Value>& prefix) {
+    return prefix.flatMap([this](const Value& value) { return build(value); });
   }
 };
 
@@ -1683,14 +1861,16 @@ class ListBuilder {
 // 整个已累加的列表（编码复杂度呈平方级）。
 class ArrayListBuilder : public ListBuilder {
  public:
-  using State = std::shared_ptr<JsonValue::Array>;
+  // 累加器保存装箱后的句柄（每个元素一次引用计数拷贝，无法避免：
+  // 句柄必须让文档存活），而不是 JsonValue——写路径因此不再构造 JSON 视图。
+  using State = std::shared_ptr<std::vector<Value>>;
 
   explicit ArrayListBuilder(const DynamicOps& ops)
       : ops_(&ops), builder_(DataResult<State>::success(initial(), Lifecycle::stable())) {}
 
   const DynamicOps& ops() const override { return *ops_; }
 
-  ListBuilder& add(const JsonValue& value) override {
+  ListBuilder& add(const Value& value) override {
     builder_ = builder_.map([value](const State& state) {
       state->push_back(value);
       return state;
@@ -1698,9 +1878,9 @@ class ArrayListBuilder : public ListBuilder {
     return *this;
   }
 
-  ListBuilder& add(const DataResult<JsonValue>& value) override {
+  ListBuilder& add(const DataResult<Value>& value) override {
     builder_ = builder_.apply2stable(
-        [](const State& state, const JsonValue& element) {
+        [](const State& state, const Value& element) {
           state->push_back(element);
           return state;
         },
@@ -1718,10 +1898,10 @@ class ArrayListBuilder : public ListBuilder {
     return *this;
   }
 
-  DataResult<JsonValue> build(const JsonValue& prefix) override;
+  DataResult<Value> build(const Value& prefix) override;
 
  private:
-  static State initial() { return std::make_shared<JsonValue::Array>(); }
+  static State initial() { return std::make_shared<std::vector<Value>>(); }
 
   const DynamicOps* ops_;
   DataResult<State> builder_;
@@ -1735,18 +1915,18 @@ class RecordBuilder {
   virtual ~RecordBuilder() = default;
 
   virtual const DynamicOps& ops() const = 0;
-  virtual RecordBuilder& add(const JsonValue& key, const JsonValue& value) = 0;
-  virtual RecordBuilder& add(const JsonValue& key, const DataResult<JsonValue>& value) = 0;
-  virtual RecordBuilder& add(const DataResult<JsonValue>& key, const DataResult<JsonValue>& value) = 0;
-  virtual RecordBuilder& add(const std::string& key, const JsonValue& value);
-  virtual RecordBuilder& add(const std::string& key, const DataResult<JsonValue>& value);
+  virtual RecordBuilder& add(const Value& key, const Value& value) = 0;
+  virtual RecordBuilder& add(const Value& key, const DataResult<Value>& value) = 0;
+  virtual RecordBuilder& add(const DataResult<Value>& key, const DataResult<Value>& value) = 0;
+  virtual RecordBuilder& add(const std::string& key, const Value& value);
+  virtual RecordBuilder& add(const std::string& key, const DataResult<Value>& value);
   virtual RecordBuilder& withErrorsFrom(const DataResultBase& result) = 0;
   virtual RecordBuilder& setLifecycle(const Lifecycle& lifecycle) = 0;
   virtual RecordBuilder& mapError(const StringUnaryOperator& onError) = 0;
-  virtual DataResult<JsonValue> build(const JsonValue& prefix) = 0;
+  virtual DataResult<Value> build(const Value& prefix) = 0;
 
-  DataResult<JsonValue> build(const DataResult<JsonValue>& prefix) {
-    return prefix.flatMap([this](const JsonValue& value) { return build(value); });
+  DataResult<Value> build(const DataResult<Value>& prefix) {
+    return prefix.flatMap([this](const Value& value) { return build(value); });
   }
 };
 
@@ -1771,8 +1951,8 @@ class AbstractRecordBuilder : public RecordBuilder {
     return *this;
   }
 
-  DataResult<JsonValue> build(const JsonValue& prefix) override {
-    DataResult<JsonValue> result =
+  DataResult<Value> build(const Value& prefix) override {
+    DataResult<Value> result =
         builder_.flatMap([&](const State& state) { return buildState(state, prefix); });
     builder_ = DataResult<State>::success(initBuilder(), Lifecycle::stable());
     return result;
@@ -1783,7 +1963,7 @@ class AbstractRecordBuilder : public RecordBuilder {
       : ops_(&ops), builder_(DataResult<State>::success(std::move(initial), Lifecycle::stable())) {}
 
   virtual State initBuilder() const = 0;
-  virtual DataResult<JsonValue> buildState(const State& state, const JsonValue& prefix) = 0;
+  virtual DataResult<Value> buildState(const State& state, const Value& prefix) = 0;
 
   const DynamicOps* ops_;
   DataResult<State> builder_;
@@ -1791,14 +1971,14 @@ class AbstractRecordBuilder : public RecordBuilder {
 
 // RecordBuilder.AbstractUniversalBuilder / RecordBuilder.MapBuilder 的移植。
 class UniversalRecordBuilder
-    : public AbstractRecordBuilder<std::shared_ptr<std::vector<std::pair<JsonValue, JsonValue>>>> {
+    : public AbstractRecordBuilder<std::shared_ptr<std::vector<std::pair<Value, Value>>>> {
  public:
-  using Members = std::vector<std::pair<JsonValue, JsonValue>>;
+  using Members = std::vector<std::pair<Value, Value>>;
   using State = std::shared_ptr<Members>;
 
   explicit UniversalRecordBuilder(const DynamicOps& ops) : AbstractRecordBuilder<State>(ops, initial()) {}
 
-  RecordBuilder& add(const JsonValue& key, const JsonValue& value) override {
+  RecordBuilder& add(const Value& key, const Value& value) override {
     builder_ = builder_.map([key, value](const State& state) {
       state->emplace_back(key, value);
       return state;
@@ -1806,22 +1986,26 @@ class UniversalRecordBuilder
     return *this;
   }
 
-  RecordBuilder& add(const JsonValue& key, const DataResult<JsonValue>& value) override {
+  RecordBuilder& add(const Value& key, const DataResult<Value>& value) override {
+    // 键名用于给编码错误加位置，所以要先拆回 JSON 视图。
+    const JsonValue::Raw* keyNode = key.as<JsonValue::Raw>();
     builder_ = builder_.apply2stable(
-        [key](const State& state, const JsonValue& element) {
+        [key](const State& state, const Value& element) {
           state->emplace_back(key, element);
           return state;
         },
         // 编码失败会携带其来源成员：`severity: Unmapped E value`。
-        key.isString() ? value.addPath(key.asString()) : value);
+        (keyNode != nullptr && keyNode->is_string())
+            ? value.addPath(keyNode->get_ref<const std::string&>())
+            : value);
     return *this;
   }
 
-  RecordBuilder& add(const DataResult<JsonValue>& key, const DataResult<JsonValue>& value) override {
+  RecordBuilder& add(const DataResult<Value>& key, const DataResult<Value>& value) override {
     const auto entry = key.apply2stable(
-        [](const JsonValue& k, const JsonValue& v) { return std::make_pair(k, v); }, value);
+        [](const Value& k, const Value& v) { return std::make_pair(k, v); }, value);
     builder_ = builder_.apply2stable(
-        [](const State& state, const std::pair<JsonValue, JsonValue>& pair) {
+        [](const State& state, const std::pair<Value, Value>& pair) {
           state->push_back(pair);
           return state;
         },
@@ -1833,30 +2017,31 @@ class UniversalRecordBuilder
 
  protected:
   State initBuilder() const override { return initial(); }
-  DataResult<JsonValue> buildState(const State& state, const JsonValue& prefix) override;
+  DataResult<Value> buildState(const State& state, const Value& prefix) override;
 };
 
 // RecordBuilder.AbstractStringBuilder / JsonOps.JsonRecordBuilder 的移植。
 class StringRecordBuilder
-    : public AbstractRecordBuilder<std::shared_ptr<std::vector<std::pair<std::string, JsonValue>>>> {
+    : public AbstractRecordBuilder<std::shared_ptr<std::vector<std::pair<std::string, Value>>>> {
  public:
-  using Members = std::vector<std::pair<std::string, JsonValue>>;
+  // 与 ArrayListBuilder 同理：成员值是装箱句柄，写盘时才落进 DOM。
+  using Members = std::vector<std::pair<std::string, Value>>;
   using State = std::shared_ptr<Members>;
 
   explicit StringRecordBuilder(const DynamicOps& ops) : AbstractRecordBuilder<State>(ops, initial()) {}
 
-  RecordBuilder& add(const std::string& key, const JsonValue& value) override {
+  RecordBuilder& add(const std::string& key, const Value& value) override {
     builder_ = builder_.map([key, value](const State& state) {
-      putJsonMember(*state, key, value);
+      state->emplace_back(key, value);
       return state;
     });
     return *this;
   }
 
-  RecordBuilder& add(const std::string& key, const DataResult<JsonValue>& value) override {
+  RecordBuilder& add(const std::string& key, const DataResult<Value>& value) override {
     builder_ = builder_.apply2stable(
-        [key](const State& state, const JsonValue& element) {
-          putJsonMember(*state, key, element);
+        [key](const State& state, const Value& element) {
+          state->emplace_back(key, element);
           return state;
         },
         // 编码失败会携带其来源成员。
@@ -1864,22 +2049,22 @@ class StringRecordBuilder
     return *this;
   }
 
-  RecordBuilder& add(const JsonValue& key, const JsonValue& value) override;
-  RecordBuilder& add(const JsonValue& key, const DataResult<JsonValue>& value) override;
-  RecordBuilder& add(const DataResult<JsonValue>& key, const DataResult<JsonValue>& value) override;
+  RecordBuilder& add(const Value& key, const Value& value) override;
+  RecordBuilder& add(const Value& key, const DataResult<Value>& value) override;
+  RecordBuilder& add(const DataResult<Value>& key, const DataResult<Value>& value) override;
 
   static State initial() { return std::make_shared<Members>(); }
 
  protected:
   State initBuilder() const override { return initial(); }
-  DataResult<JsonValue> buildState(const State& state, const JsonValue& prefix) override;
+  DataResult<Value> buildState(const State& state, const Value& prefix) override;
 };
 
 // MapEncoder.makeCompressedBuilder 的 CompressedRecordBuilder 的移植。
 class CompressedRecordBuilder
-    : public AbstractRecordBuilder<std::shared_ptr<std::vector<std::optional<JsonValue>>>> {
+    : public AbstractRecordBuilder<std::shared_ptr<std::vector<std::optional<Value>>>> {
  public:
-  using Slots = std::vector<std::optional<JsonValue>>;
+  using Slots = std::vector<std::optional<Value>>;
   using State = std::shared_ptr<Slots>;
 
   CompressedRecordBuilder(const DynamicOps& ops, KeyCompressor compressor)
@@ -1890,7 +2075,7 @@ class CompressedRecordBuilder
     return std::make_shared<Slots>(static_cast<size_t>(size), std::nullopt);
   }
 
-  RecordBuilder& add(const JsonValue& key, const JsonValue& value) override {
+  RecordBuilder& add(const Value& key, const Value& value) override {
     builder_ = builder_.map([this, key, value](const State& state) {
       assign(key, value, state);
       return state;
@@ -1898,23 +2083,26 @@ class CompressedRecordBuilder
     return *this;
   }
 
-  RecordBuilder& add(const JsonValue& key, const DataResult<JsonValue>& value) override {
+  RecordBuilder& add(const Value& key, const DataResult<Value>& value) override {
+    const JsonValue::Raw* keyNode = key.as<JsonValue::Raw>();
     builder_ = builder_.apply2stable(
-        [this, key](const State& state, const JsonValue& element) {
+        [this, key](const State& state, const Value& element) {
           assign(key, element, state);
           return state;
         },
         // 压缩记录会保留键名以便诊断（槽位下标
         // 对读者毫无意义）。
-        key.isString() ? value.addPath(key.asString()) : value);
+        (keyNode != nullptr && keyNode->is_string())
+            ? value.addPath(keyNode->get_ref<const std::string&>())
+            : value);
     return *this;
   }
 
-  RecordBuilder& add(const DataResult<JsonValue>& key, const DataResult<JsonValue>& value) override {
+  RecordBuilder& add(const DataResult<Value>& key, const DataResult<Value>& value) override {
     const auto entry = key.apply2stable(
-        [](const JsonValue& k, const JsonValue& v) { return std::make_pair(k, v); }, value);
+        [](const Value& k, const Value& v) { return std::make_pair(k, v); }, value);
     builder_ = builder_.apply2stable(
-        [this](const State& state, const std::pair<JsonValue, JsonValue>& pair) {
+        [this](const State& state, const std::pair<Value, Value>& pair) {
           assign(pair.first, pair.second, state);
           return state;
         },
@@ -1924,13 +2112,13 @@ class CompressedRecordBuilder
 
  protected:
   State initBuilder() const override { return emptySlots(compressor_.size()); }
-  DataResult<JsonValue> buildState(const State& state, const JsonValue& prefix) override;
+  DataResult<Value> buildState(const State& state, const Value& prefix) override;
 
  private:
   // Java 写入一个由压缩器确定大小的稠密列表；从未被写入的条目
   // 保持为 null，这正是压缩解码器读回时
   // 视为「缺失」的东西。
-  void assign(const JsonValue& key, const JsonValue& value, const State& state) const {
+  void assign(const Value& key, const Value& value, const State& state) const {
     const int index = compressor_.compress(key);
     if (index >= 0 && static_cast<size_t>(index) < state->size()) {
       (*state)[static_cast<size_t>(index)] = value;
@@ -1947,135 +2135,154 @@ class DynamicOps {
  public:
   virtual ~DynamicOps() = default;
 
+  // --- 诊断（新增） -----------------------------------------------------
+  // 把值渲染成文本。错误消息过去硬编码 JSON 渲染
+  // （`input.dump()`），泛化之后必须由 ops 决定，否则接第二种格式时
+  // 用户看到的会是 JSON 原文。
+  virtual std::string toString(const Value& input) const = 0;
+
+  // 两个句柄表示同一个值吗？基类的 mergeToPrimitive 用 DFU 的
+  // `prefix.equals(empty())` 判断前缀是否为空。默认实现退化为节点身份
+  // 比较，JsonOps 覆盖为 JsonValue 的深度相等（与移植前的行为一致）。
+  virtual bool valueEquals(const Value& left, const Value& right) const {
+    return left.node == right.node && left.tag == right.tag;
+  }
+
   // --- 基础类型 ---------------------------------------------------------
-  virtual JsonValue empty() const = 0;
+  virtual Value empty() const = 0;
 
-  virtual JsonValue emptyMap() const { return createMap({}); }
-  virtual JsonValue emptyList() const { return createList({}); }
+  virtual Value emptyMap() const { return createMap({}); }
+  virtual Value emptyList() const { return createList({}); }
 
-  // 在 DFU 中，这里会把值重写成目标 ops 的表示形式；
-  // 本移植的值类型是通用的，因此 JsonOps 把它实现为恒等变换。
-  virtual JsonValue convertTo(const DynamicOps& outOps, const JsonValue& input) const = 0;
+  // 在 DFU 中，这里会把值重写成目标 ops 的表示形式。接第二种 ops 之前，
+  // 值类型是通用的（句柄 + 各自的 DOM），因此 JsonOps 把它实现为恒等变换；
+  // 跨格式（JSON ↔ TOML）时由源 ops 递归转换。
+  virtual Value convertTo(const DynamicOps& outOps, const Value& input) const = 0;
 
-  virtual DataResult<Number> getNumberValue(const JsonValue& input) const = 0;
+  virtual DataResult<Number> getNumberValue(const Value& input) const = 0;
 
-  Number getNumberValue(const JsonValue& input, const Number& defaultValue) const {
+  Number getNumberValue(const Value& input, const Number& defaultValue) const {
     const DataResult<Number> result = getNumberValue(input);
     return result.result().has_value() ? *result.result() : defaultValue;
   }
 
-  virtual JsonValue createNumeric(const Number& value) const = 0;
+  virtual Value createNumeric(const Number& value) const = 0;
 
-  virtual JsonValue createByte(int8_t value) const { return createNumeric(Number::ofInt(value)); }
-  virtual JsonValue createShort(int16_t value) const { return createNumeric(Number::ofInt(value)); }
-  virtual JsonValue createInt(int32_t value) const { return createNumeric(Number::ofInt(value)); }
-  virtual JsonValue createLong(int64_t value) const { return createNumeric(Number::ofInt(value)); }
-  virtual JsonValue createFloat(float value) const { return createNumeric(Number::ofDouble(value)); }
-  virtual JsonValue createDouble(double value) const { return createNumeric(Number::ofDouble(value)); }
+  virtual Value createByte(int8_t value) const { return createNumeric(Number::ofInt(value)); }
+  virtual Value createShort(int16_t value) const { return createNumeric(Number::ofInt(value)); }
+  virtual Value createInt(int32_t value) const { return createNumeric(Number::ofInt(value)); }
+  virtual Value createLong(int64_t value) const { return createNumeric(Number::ofInt(value)); }
+  virtual Value createFloat(float value) const { return createNumeric(Number::ofDouble(value)); }
+  virtual Value createDouble(double value) const { return createNumeric(Number::ofDouble(value)); }
 
-  virtual DataResult<bool> getBooleanValue(const JsonValue& input) const {
+  virtual DataResult<bool> getBooleanValue(const Value& input) const {
     return getNumberValue(input).map([](const Number& number) { return number.booleanValue(); });
   }
-  virtual JsonValue createBoolean(bool value) const { return createByte(value ? 1 : 0); }
+  virtual Value createBoolean(bool value) const { return createByte(value ? 1 : 0); }
 
-  virtual DataResult<std::string> getStringValue(const JsonValue& input) const = 0;
-  virtual JsonValue createString(const std::string& value) const = 0;
+  virtual DataResult<std::string> getStringValue(const Value& input) const = 0;
+  virtual Value createString(const std::string& value) const = 0;
 
   // --- 列表/映射构造 ---------------------------------------------
-  virtual DataResult<JsonValue> mergeToList(const JsonValue& list, const JsonValue& value) const = 0;
+  virtual DataResult<Value> mergeToList(const Value& list, const Value& value) const = 0;
 
-  virtual DataResult<JsonValue> mergeToList(const JsonValue& list,
-                                            const std::vector<JsonValue>& values) const {
-    DataResult<JsonValue> result = DataResult<JsonValue>::success(list);
-    for (const JsonValue& value : values) {
-      result = result.flatMap([&](const JsonValue& current) { return mergeToList(current, value); });
+  virtual DataResult<Value> mergeToList(const Value& list,
+                                            const std::vector<Value>& values) const {
+    DataResult<Value> result = DataResult<Value>::success(list);
+    for (const Value& value : values) {
+      result = result.flatMap([&](const Value& current) { return mergeToList(current, value); });
     }
     return result;
   }
 
-  virtual DataResult<JsonValue> mergeToMap(const JsonValue& map, const JsonValue& key,
-                                           const JsonValue& value) const = 0;
+  virtual DataResult<Value> mergeToMap(const Value& map, const Value& key,
+                                           const Value& value) const = 0;
 
-  virtual DataResult<JsonValue> mergeToMap(
-      const JsonValue& map, const std::vector<std::pair<JsonValue, JsonValue>>& values) const {
-    DataResult<JsonValue> result = DataResult<JsonValue>::success(map);
+  virtual DataResult<Value> mergeToMap(
+      const Value& map, const std::vector<std::pair<Value, Value>>& values) const {
+    DataResult<Value> result = DataResult<Value>::success(map);
     for (const auto& entry : values) {
       result = result.flatMap(
-          [&](const JsonValue& current) { return mergeToMap(current, entry.first, entry.second); });
+          [&](const Value& current) { return mergeToMap(current, entry.first, entry.second); });
     }
     return result;
   }
 
-  virtual DataResult<JsonValue> mergeToMap(const JsonValue& map, const MapLike& values) const {
-    DataResult<JsonValue> result = DataResult<JsonValue>::success(map);
+  virtual DataResult<Value> mergeToMap(const Value& map, const MapLike& values) const {
+    DataResult<Value> result = DataResult<Value>::success(map);
     for (const auto& entry : values.entries()) {
       result = result.flatMap(
-          [&](const JsonValue& current) { return mergeToMap(current, entry.first, entry.second); });
+          [&](const Value& current) { return mergeToMap(current, entry.first, entry.second); });
     }
     return result;
   }
 
-  virtual DataResult<JsonValue> mergeToPrimitive(const JsonValue& prefix,
-                                                 const JsonValue& value) const {
-    if (!(prefix == empty())) {
-      return DataResult<JsonValue>::error(
-          "Do not know how to append a primitive value " + value.dump() + " to " + prefix.dump(),
+  virtual DataResult<Value> mergeToPrimitive(const Value& prefix,
+                                                 const Value& value) const {
+    if (!valueEquals(prefix, empty())) {
+      return DataResult<Value>::error(
+          "Do not know how to append a primitive value " + toString(value) + " to " +
+              toString(prefix),
           value);
     }
-    return DataResult<JsonValue>::success(value);
+    return DataResult<Value>::success(value);
   }
 
   // --- 映射访问 ---------------------------------------------------------
-  virtual DataResult<std::vector<std::pair<JsonValue, JsonValue>>> getMapValues(
-      const JsonValue& input) const = 0;
+  virtual DataResult<std::vector<std::pair<Value, Value>>> getMapValues(
+      const Value& input) const = 0;
 
-  virtual DataResult<MapLikePtr> getMap(const JsonValue& input) const {
-    if (!input.isObject()) {
-      return DataResult<MapLikePtr>::error("Not a JSON object: " + input.dump());
+  virtual DataResult<MapLikePtr> getMap(const Value& input) const {
+    // Phase 1：这个默认实现仍由 JsonValue 支撑（本移植的 MapLike 就是 JSON
+    // 对象视图，且 JsonOps 依赖它的 null 怪癖）。接第二种 ops 时，它应当改成
+    // 基于 getMapValues 的通用实现，或由各 ops 自己覆盖。
+    const JsonValue::Raw* node = input.as<JsonValue::Raw>();
+    if (node == nullptr || !node->is_object()) {
+      return DataResult<MapLikePtr>::error("Not a JSON object: " + toString(input));
     }
-    return DataResult<MapLikePtr>::success(std::make_shared<JsonObjectMapLike>(input));
+    return DataResult<MapLikePtr>::success(std::make_shared<JsonObjectMapLike>(input.owner, node));
   }
 
-  virtual JsonValue createMap(const std::vector<std::pair<JsonValue, JsonValue>>& entries) const = 0;
+  virtual Value createMap(const std::vector<std::pair<Value, Value>>& entries) const = 0;
 
   // --- 列表访问 --------------------------------------------------------
-  virtual DataResult<std::vector<JsonValue>> getStream(const JsonValue& input) const = 0;
+  virtual DataResult<std::vector<Value>> getStream(const Value& input) const = 0;
 
-  virtual DataResult<std::vector<JsonValue>> getList(const JsonValue& input) const {
+  virtual DataResult<std::vector<Value>> getList(const Value& input) const {
     return getStream(input);
   }
 
-  virtual JsonValue createList(const std::vector<JsonValue>& values) const = 0;
+  virtual Value createList(const std::vector<Value>& values) const = 0;
 
-  virtual JsonValue remove(const JsonValue& input, const std::string& key) const = 0;
+  virtual Value remove(const Value& input, const std::string& key) const = 0;
 
   // --- 泛型访问 -----------------------------------------------------
   virtual bool compressMaps() const { return false; }
 
-  DataResult<JsonValue> get(const JsonValue& input, const std::string& key) const {
+  DataResult<Value> get(const Value& input, const std::string& key) const {
     return getGeneric(input, createString(key));
   }
 
-  DataResult<JsonValue> getGeneric(const JsonValue& input, const JsonValue& key) const {
-    return getMap(input).flatMap([&](const MapLikePtr& map) -> DataResult<JsonValue> {
-      const std::optional<JsonValue> value = map->get(key);
+  DataResult<Value> getGeneric(const Value& input, const Value& key) const {
+    return getMap(input).flatMap([&](const MapLikePtr& map) -> DataResult<Value> {
+      const std::optional<Value> value = map->get(key);
       if (!value.has_value()) {
-        return DataResult<JsonValue>::error("No element " + key.dump() + " in the map " +
-                                            input.dump());
+        return DataResult<Value>::error("No element " + toString(key) + " in the map " +
+                                            toString(input));
       }
-      return DataResult<JsonValue>::success(*value);
+      return DataResult<Value>::success(*value);
     });
   }
 
-  JsonValue set(const JsonValue& input, const std::string& key, const JsonValue& value) const {
-    const DataResult<JsonValue> result = mergeToMap(input, createString(key), value);
+  Value set(const Value& input, const std::string& key, const Value& value) const {
+    const DataResult<Value> result = mergeToMap(input, createString(key), value);
     return result.result().has_value() ? *result.result() : input;
   }
 
-  JsonValue update(const JsonValue& input, const std::string& key,
-                   const std::function<JsonValue(const JsonValue&)>& function) const {
-    const DataResult<JsonValue> result =
-        get(input, key).map([&](const JsonValue& value) { return set(input, key, function(value)); });
+  Value update(const Value& input, const std::string& key,
+               const std::function<Value(const Value&)>& function) const {
+    const DataResult<Value> result =
+        get(input, key).map([&](const Value& value) { return set(input, key, function(value)); });
     return result.result().has_value() ? *result.result() : input;
   }
 
@@ -2084,21 +2291,21 @@ class DynamicOps {
   virtual std::shared_ptr<RecordBuilder> mapBuilder() const;
 
   // --- 转换辅助方法 -------------------------------------------------
-  JsonValue convertList(const DynamicOps& outOps, const JsonValue& input) const {
-    const DataResult<std::vector<JsonValue>> stream = getStream(input);
-    std::vector<JsonValue> converted;
+  Value convertList(const DynamicOps& outOps, const Value& input) const {
+    const DataResult<std::vector<Value>> stream = getStream(input);
+    std::vector<Value> converted;
     if (stream.result().has_value()) {
       converted.reserve(stream.result()->size());
-      for (const JsonValue& element : *stream.result()) {
+      for (const Value& element : *stream.result()) {
         converted.push_back(convertTo(outOps, element));
       }
     }
     return outOps.createList(converted);
   }
 
-  JsonValue convertMap(const DynamicOps& outOps, const JsonValue& input) const {
-    const DataResult<std::vector<std::pair<JsonValue, JsonValue>>> entries = getMapValues(input);
-    std::vector<std::pair<JsonValue, JsonValue>> converted;
+  Value convertMap(const DynamicOps& outOps, const Value& input) const {
+    const DataResult<std::vector<std::pair<Value, Value>>> entries = getMapValues(input);
+    std::vector<std::pair<Value, Value>> converted;
     if (entries.result().has_value()) {
       converted.reserve(entries.result()->size());
       for (const auto& entry : *entries.result()) {
@@ -2112,17 +2319,17 @@ class DynamicOps {
 // ---------------------------------------------------------------------------
 // 需要 DynamicOps 完整定义的类外定义
 // ---------------------------------------------------------------------------
-inline RecordBuilder& RecordBuilder::add(const std::string& key, const JsonValue& value) {
+inline RecordBuilder& RecordBuilder::add(const std::string& key, const Value& value) {
   return add(ops().createString(key), value);
 }
 
 inline RecordBuilder& RecordBuilder::add(const std::string& key,
-                                        const DataResult<JsonValue>& value) {
+                                        const DataResult<Value>& value) {
   return add(ops().createString(key), value);
 }
 
 // 移植自 RecordBuilder.AbstractStringBuilder#add(T key, ...)。
-inline RecordBuilder& StringRecordBuilder::add(const JsonValue& key, const JsonValue& value) {
+inline RecordBuilder& StringRecordBuilder::add(const Value& key, const Value& value) {
   builder_ = ops().getStringValue(key).flatMap([this, value](const std::string& k) {
     add(k, value);
     return builder_;
@@ -2130,8 +2337,8 @@ inline RecordBuilder& StringRecordBuilder::add(const JsonValue& key, const JsonV
   return *this;
 }
 
-inline RecordBuilder& StringRecordBuilder::add(const JsonValue& key,
-                                              const DataResult<JsonValue>& value) {
+inline RecordBuilder& StringRecordBuilder::add(const Value& key,
+                                              const DataResult<Value>& value) {
   builder_ = ops().getStringValue(key).flatMap([this, value](const std::string& k) {
     add(k, value);
     return builder_;
@@ -2139,9 +2346,9 @@ inline RecordBuilder& StringRecordBuilder::add(const JsonValue& key,
   return *this;
 }
 
-inline RecordBuilder& StringRecordBuilder::add(const DataResult<JsonValue>& key,
-                                              const DataResult<JsonValue>& value) {
-  builder_ = key.flatMap([this](const JsonValue& k) { return ops().getStringValue(k); })
+inline RecordBuilder& StringRecordBuilder::add(const DataResult<Value>& key,
+                                              const DataResult<Value>& value) {
+  builder_ = key.flatMap([this](const Value& k) { return ops().getStringValue(k); })
                  .flatMap([this, value](const std::string& k) {
                    add(k, value);
                    return builder_;
@@ -2149,56 +2356,78 @@ inline RecordBuilder& StringRecordBuilder::add(const DataResult<JsonValue>& key,
   return *this;
 }
 
-inline DataResult<JsonValue> ArrayListBuilder::build(const JsonValue& prefix) {
-  DataResult<JsonValue> result =
-      builder_.flatMap([&](const State& array) -> DataResult<JsonValue> {
-        if (!prefix.isArray() && !(prefix == ops_->empty())) {
-          return DataResult<JsonValue>::error("Cannot append a list to not a list: " + prefix.dump(),
+inline DataResult<Value> ArrayListBuilder::build(const Value& prefix) {
+  // prefix 与被追加的元素都在节点层面处理，不构造 JsonValue。
+  const JsonValue::Raw* prefixNode = prefix.as<JsonValue::Raw>();
+  // 与原先一致：prefix 与 empty() 按 ops 的深度相等比较（不是节点身份），
+  // 否则"另一个 null 节点"会被当成"不是列表"而报错。
+  const bool prefixIsEmpty = ops_->valueEquals(prefix, ops_->empty());
+  DataResult<Value> result =
+      builder_.flatMap([&](const State& array) -> DataResult<Value> {
+        if (prefixNode == nullptr) {
+          return DataResult<Value>::error(
+              "Cannot append a list to not a list: " + ops_->toString(prefix), prefix);
+        }
+        if (!prefixNode->is_array() && !prefixIsEmpty) {
+          return DataResult<Value>::error("Cannot append a list to not a list: " + prefixNode->dump(),
                                               prefix);
         }
-        JsonValue::Array out;
-        if (!(prefix == ops_->empty())) {
-          out = prefix.asArray();
+        JsonValue::Raw out = prefixNode->is_array() ? *prefixNode : JsonValue::Raw::array();
+        for (const Value& element : *array) {
+          const JsonValue::Raw* node = element.as<JsonValue::Raw>();
+          if (node == nullptr) {
+            return DataResult<Value>::error("Cannot append a non-JSON value to a list", prefix);
+          }
+          out.push_back(*node);
         }
-        out.insert(out.end(), array->begin(), array->end());
-        return DataResult<JsonValue>::success(JsonValue::array(std::move(out)), Lifecycle::stable());
+        auto owner = std::make_shared<const JsonValue::Raw>(std::move(out));
+        return DataResult<Value>::success(
+            Value::of<JsonValue::Raw>(std::move(owner), owner.get()), Lifecycle::stable());
       });
   builder_ = DataResult<State>::success(initial(), Lifecycle::stable());
   return result;
 }
 
-inline DataResult<JsonValue> UniversalRecordBuilder::buildState(const State& state,
-                                                                const JsonValue& prefix) {
+inline DataResult<Value> UniversalRecordBuilder::buildState(const State& state,
+                                                                const Value& prefix) {
   return ops_->mergeToMap(prefix, *state);
 }
 
-inline DataResult<JsonValue> StringRecordBuilder::buildState(const State& state,
-                                                             const JsonValue& prefix) {
-  // 移植自 JsonOps.JsonRecordBuilder#build。
-  if (prefix.isNull() || prefix == ops_->empty()) {
-    JsonValue::Object members;
-    members.reserve(state->size());
-    for (const auto& entry : *state) {
-      members.emplace_back(entry.first, entry.second);
-    }
-    return DataResult<JsonValue>::success(JsonValue::object(std::move(members)));
+inline DataResult<Value> StringRecordBuilder::buildState(const State& state,
+                                                             const Value& prefix) {
+  // 移植自 JsonOps.JsonRecordBuilder#build。prefix 与成员值都在节点上处理。
+  const JsonValue::Raw* prefixNode = prefix.as<JsonValue::Raw>();
+  if (prefixNode == nullptr) {
+    return DataResult<Value>::error("mergeToMap called with not a map: " + ops_->toString(prefix),
+                                    prefix);
   }
-  if (!prefix.isObject()) {
-    return DataResult<JsonValue>::error("mergeToMap called with not a map: " + prefix.dump(), prefix);
+  const bool prefixIsEmpty = ops_->valueEquals(prefix, ops_->empty());
+  if (!prefixIsEmpty && !prefixNode->is_object()) {
+    // 非对象（也不是 null/空）的 prefix 要报错，与移植前一致。
+    return DataResult<Value>::error("mergeToMap called with not a map: " + prefixNode->dump(),
+                                    prefix);
   }
-  JsonValue::Object members = prefix.asObject();
+  JsonValue::Raw members =
+      (prefixNode->is_object() && !prefixIsEmpty) ? *prefixNode : JsonValue::Raw::object();
   for (const auto& entry : *state) {
-    putJsonMember(members, entry.first, entry.second);
+    const JsonValue::Raw* value = entry.second.as<JsonValue::Raw>();
+    if (value == nullptr) {
+      return DataResult<Value>::error("Cannot write a non-JSON value into a map", prefix);
+    }
+    putRawMember(members, entry.first, *value);
   }
-  return DataResult<JsonValue>::success(JsonValue::object(std::move(members)));
+  auto owner = std::make_shared<const JsonValue::Raw>(std::move(members));
+  return DataResult<Value>::success(Value::of<JsonValue::Raw>(std::move(owner), owner.get()));
 }
 
-inline DataResult<JsonValue> CompressedRecordBuilder::buildState(const State& state,
-                                                                const JsonValue& prefix) {
-  std::vector<JsonValue> values;
+inline DataResult<Value> CompressedRecordBuilder::buildState(const State& state,
+                                                                const Value& prefix) {
+  // 空槽位写 JSON null：缓存一个 null 句柄，避免每个空槽都新建一次。
+  static const Value kNull = JsonValue::null();
+  std::vector<Value> values;
   values.reserve(state->size());
-  for (const std::optional<JsonValue>& entry : *state) {
-    values.push_back(entry.has_value() ? *entry : JsonValue::null());
+  for (const std::optional<Value>& entry : *state) {
+    values.push_back(entry.has_value() ? *entry : kNull);
   }
   return ops_->mergeToList(prefix, values);
 }
@@ -2211,10 +2440,12 @@ inline std::shared_ptr<RecordBuilder> DynamicOps::mapBuilder() const {
   return std::make_shared<UniversalRecordBuilder>(*this);
 }
 
-inline KeyCompressor::KeyCompressor(const DynamicOps& ops, const std::vector<JsonValue>& keys)
+inline KeyCompressor::KeyCompressor(const DynamicOps& ops, const std::vector<Value>& keys)
     : ops_(&ops) {
-  for (const JsonValue& key : keys) {
-    const std::string identity = key.dump();
+  for (const Value& key : keys) {
+    // KeyCompressor 是格式无关的：渲染键要用 ops 的 toString，
+    // 不能假设键是 JSON（这是新增 toString 的第二个理由）。
+    const std::string identity = ops.toString(key);
     if (compressByValue_.count(identity) != 0) {
       continue;
     }
@@ -2236,8 +2467,8 @@ inline int KeyCompressor::compress(const std::string& key) const {
   return compress(ops_->createString(key));
 }
 
-inline int KeyCompressor::compress(const JsonValue& key) const {
-  const auto found = compressByValue_.find(key.dump());
+inline int KeyCompressor::compress(const Value& key) const {
+  const auto found = compressByValue_.find(ops_->toString(key));
   return found == compressByValue_.end() ? -1 : found->second;
 }
 
@@ -2262,7 +2493,7 @@ class JsonOps : public DynamicOps {
   static const JsonOps INSTANCE;
   static const JsonOps COMPRESSED;
 
-  explicit JsonOps(bool compressed) : compressed_(compressed) {}
+  explicit JsonOps(bool compressed) : compressed_(compressed), empty_(JsonValue::null()) {}
 
   // 重新暴露 JsonOps 特化的 DynamicOps 重载集合，使
   // `ops.getNumberValue(value, fallback)` / `ops.mergeToMap(map, mapLike)` 在
@@ -2271,24 +2502,45 @@ class JsonOps : public DynamicOps {
   using DynamicOps::mergeToMap;
 
   // --- 基础类型 ---------------------------------------------------------
-  JsonValue empty() const override { return JsonValue::null(); }
+  // empty() 是"JSON null"这个不变值：缓存成成员，省掉每次调用都新建空值
+  // （以及随之而来的引用计数）。
+  Value empty() const override { return empty_; }
 
-  JsonValue convertTo(const DynamicOps& outOps, const JsonValue& input) const override {
+  Value convertTo(const DynamicOps& outOps, const Value& input) const override {
     (void)outOps;
-    // 移植版的序列化值类型是通用的（它扮演
-    // JsonElement 的角色），因此在各 ops 之间转换是恒等操作。
+    // 到目前为止值类型是通用的（JsonValue 扮演 DFU 里 JsonElement 的角色），
+    // 因此跨 ops 的转换仍是恒等；接第二种 ops 时这里改为
+    // 由源 ops 递归遍历自己的 DOM、逐节点调用目标 ops 的 createX。
     return input;
   }
 
-  DataResult<Number> getNumberValue(const JsonValue& input) const override {
-    if (input.isNumber()) {
-      return DataResult<Number>::success(input.asNumber());
+  // ops 自己的名字（诊断用）。
+  std::string toString() const { return "JSON"; }
+
+  // 把值渲染成文本（错误消息用）：JSON 就是 dump。
+  std::string toString(const Value& input) const override { return requireNode(input)->dump(); }
+
+  // 句柄表示同一个值吗？基类靠它实现 DFU 的 `prefix.equals(empty())`。
+  // 节点级深度相等，语义与 JsonValue::equals 逐字对应，但不构造句柄。
+  bool valueEquals(const Value& left, const Value& right) const override {
+    const JsonValue::Raw* a = left.as<JsonValue::Raw>();
+    const JsonValue::Raw* b = right.as<JsonValue::Raw>();
+    if (a == nullptr || b == nullptr) {
+      return a == nullptr && b == nullptr && left.node == right.node && left.tag == right.tag;
     }
-    if (input.isBoolean()) {
-      return DataResult<Number>::success(Number::ofInt(input.asBoolean() ? 1 : 0));
+    return detail::jsonNodesEqual(*a, *b);
+  }
+
+  DataResult<Number> getNumberValue(const Value& input) const override {
+    const JsonValue::Raw* node = requireNode(input);
+    if (node->is_number()) {
+      return DataResult<Number>::success(detail::numberOf(*node));
     }
-    if (compressed_ && input.isString()) {
-      const std::string& text = input.asString();
+    if (node->is_boolean()) {
+      return DataResult<Number>::success(Number::ofInt(node->get<bool>() ? 1 : 0));
+    }
+    if (compressed_ && node->is_string()) {
+      const std::string& text = node->get_ref<const std::string&>();
       char* end = nullptr;
       const long long value = std::strtoll(text.c_str(), &end, 10);
       if (end != nullptr && *end == '\0' && !text.empty()) {
@@ -2296,148 +2548,182 @@ class JsonOps : public DynamicOps {
       }
       return DataResult<Number>::error("Not a number: NumberFormatException " + text);
     }
-    return DataResult<Number>::error("Not a number: " + input.dump());
+    return DataResult<Number>::error("Not a number: " + node->dump());
   }
 
-  JsonValue createNumeric(const Number& value) const override { return JsonValue::number(value); }
-
-  DataResult<bool> getBooleanValue(const JsonValue& input) const override {
-    if (input.isBoolean()) {
-      return DataResult<bool>::success(input.asBoolean());
-    }
-    if (input.isNumber()) {
-      return DataResult<bool>::success(input.asNumber().byteValue() != 0);
-    }
-    return DataResult<bool>::error("Not a boolean: " + input.dump());
+  Value createNumeric(const Number& value) const override {
+    return box(value.isIntegral() ? JsonValue::Raw(value.longValue())
+                                  : JsonValue::Raw(value.doubleValue()));
   }
 
-  JsonValue createBoolean(bool value) const override { return JsonValue::boolean(value); }
-
-  DataResult<std::string> getStringValue(const JsonValue& input) const override {
-    if (input.isString()) {
-      return DataResult<std::string>::success(input.asString());
+  DataResult<bool> getBooleanValue(const Value& input) const override {
+    const JsonValue::Raw* node = requireNode(input);
+    if (node->is_boolean()) {
+      return DataResult<bool>::success(node->get<bool>());
     }
-    if (compressed_ && input.isNumber()) {
-      return DataResult<std::string>::success(input.asNumber().toString());
+    if (node->is_number()) {
+      return DataResult<bool>::success(detail::numberOf(*node).byteValue() != 0);
     }
-    return DataResult<std::string>::error("Not a string: " + input.dump());
+    return DataResult<bool>::error("Not a boolean: " + node->dump());
   }
 
-  JsonValue createString(const std::string& value) const override {
-    return JsonValue::string(value);
+  Value createBoolean(bool value) const override { return box(JsonValue::Raw(value)); }
+
+  DataResult<std::string> getStringValue(const Value& input) const override {
+    const JsonValue::Raw* node = requireNode(input);
+    if (node->is_string()) {
+      return DataResult<std::string>::success(node->get_ref<const std::string&>());
+    }
+    if (compressed_ && node->is_number()) {
+      return DataResult<std::string>::success(detail::numberOf(*node).toString());
+    }
+    return DataResult<std::string>::error("Not a string: " + node->dump());
+  }
+
+  Value createString(const std::string& value) const override {
+    return box(JsonValue::Raw(value));
   }
 
   // --- list/map 构造 ---------------------------------------------
-  DataResult<JsonValue> mergeToList(const JsonValue& list, const JsonValue& value) const override {
-    if (!list.isArray() && !(list == empty())) {
-      return DataResult<JsonValue>::error("mergeToList called with not a list: " + list.dump(), list);
+  DataResult<Value> mergeToList(const Value& list, const Value& value) const override {
+    const JsonValue::Raw* listNode = requireNode(list);
+    const JsonValue::Raw* valueNode = requireNode(value);
+    if (!listNode->is_array() && !valueEquals(list, empty_)) {
+      return DataResult<Value>::error("mergeToList called with not a list: " + listNode->dump(),
+                                      list);
     }
-    JsonValue::Array out = list.isArray() ? list.asArray() : JsonValue::Array{};
-    out.push_back(value);
-    return DataResult<JsonValue>::success(JsonValue::array(std::move(out)));
+    JsonValue::Raw out = listNode->is_array() ? *listNode : JsonValue::Raw::array();
+    out.push_back(*valueNode);
+    return DataResult<Value>::success(box(std::move(out)));
   }
 
-  DataResult<JsonValue> mergeToList(const JsonValue& list,
-                                    const std::vector<JsonValue>& values) const override {
-    if (!list.isArray() && !(list == empty())) {
-      return DataResult<JsonValue>::error("mergeToList called with not a list: " + list.dump(), list);
+  DataResult<Value> mergeToList(const Value& list,
+                                    const std::vector<Value>& values) const override {
+    const JsonValue::Raw* listNode = requireNode(list);
+    if (!listNode->is_array() && !valueEquals(list, empty_)) {
+      return DataResult<Value>::error("mergeToList called with not a list: " + listNode->dump(),
+                                      list);
     }
-    JsonValue::Array out = list.isArray() ? list.asArray() : JsonValue::Array{};
-    out.insert(out.end(), values.begin(), values.end());
-    return DataResult<JsonValue>::success(JsonValue::array(std::move(out)));
+    JsonValue::Raw out = listNode->is_array() ? *listNode : JsonValue::Raw::array();
+    for (const Value& value : values) {
+      out.push_back(*requireNode(value));
+    }
+    return DataResult<Value>::success(box(std::move(out)));
   }
 
-  DataResult<JsonValue> mergeToMap(const JsonValue& map, const JsonValue& key,
-                                   const JsonValue& value) const override {
-    if (!map.isObject() && !(map == empty())) {
-      return DataResult<JsonValue>::error("mergeToMap called with not a map: " + map.dump(), map);
+  DataResult<Value> mergeToMap(const Value& map, const Value& key,
+                                   const Value& value) const override {
+    const JsonValue::Raw* mapNode = requireNode(map);
+    const JsonValue::Raw* keyNode = requireNode(key);
+    const JsonValue::Raw* valueNode = requireNode(value);
+    if (!mapNode->is_object() && !valueEquals(map, empty_)) {
+      return DataResult<Value>::error("mergeToMap called with not a map: " + mapNode->dump(), map);
     }
-    const std::optional<std::string> keyString = asKeyString(key);
+    const std::optional<std::string> keyString = asKeyString(*keyNode);
     if (!keyString.has_value()) {
-      return DataResult<JsonValue>::error("key is not a string: " + key.dump(), map);
+      return DataResult<Value>::error("key is not a string: " + keyNode->dump(), map);
     }
-    JsonValue::Object out = map.isObject() ? map.asObject() : JsonValue::Object{};
-    putJsonMember(out, *keyString, value);
-    return DataResult<JsonValue>::success(JsonValue::object(std::move(out)));
+    JsonValue::Raw out = mapNode->is_object() ? *mapNode : JsonValue::Raw::object();
+    putRawMember(out, *keyString, *valueNode);
+    return DataResult<Value>::success(box(std::move(out)));
   }
 
-  DataResult<JsonValue> mergeToMap(
-      const JsonValue& map,
-      const std::vector<std::pair<JsonValue, JsonValue>>& values) const override {
-    if (!map.isObject() && !(map == empty())) {
-      return DataResult<JsonValue>::error("mergeToMap called with not a map: " + map.dump(), map);
+  DataResult<Value> mergeToMap(
+      const Value& map,
+      const std::vector<std::pair<Value, Value>>& values) const override {
+    const JsonValue::Raw* mapNode = requireNode(map);
+    if (!mapNode->is_object() && !valueEquals(map, empty_)) {
+      return DataResult<Value>::error("mergeToMap called with not a map: " + mapNode->dump(), map);
     }
-    JsonValue::Object out = map.isObject() ? map.asObject() : JsonValue::Object{};
-    std::vector<JsonValue> missed;
+    JsonValue::Raw out = mapNode->is_object() ? *mapNode : JsonValue::Raw::object();
+    std::vector<JsonValue::Raw> missed;
     for (const auto& entry : values) {
-      const std::optional<std::string> keyString = asKeyString(entry.first);
+      const JsonValue::Raw* keyNode = requireNode(entry.first);
+      const std::optional<std::string> keyString = asKeyString(*keyNode);
       if (keyString.has_value()) {
-        putJsonMember(out, *keyString, entry.second);
+        putRawMember(out, *keyString, *requireNode(entry.second));
       } else {
-        missed.push_back(entry.first);
+        missed.push_back(*keyNode);
       }
     }
     if (!missed.empty()) {
-      return DataResult<JsonValue>::error("some keys are not strings: " + JsonValue::array(missed).dump(),
-                                          JsonValue::object(out));
+      JsonValue::Raw missedArray = JsonValue::Raw::array();
+      for (const JsonValue::Raw& key : missed) {
+        missedArray.push_back(key);
+      }
+      return DataResult<Value>::error("some keys are not strings: " + missedArray.dump(),
+                                          Value(JsonValue(std::move(out))));
     }
-    return DataResult<JsonValue>::success(JsonValue::object(std::move(out)));
+    return DataResult<Value>::success(box(std::move(out)));
   }
 
   // --- map 访问 ---------------------------------------------------------
-  DataResult<std::vector<std::pair<JsonValue, JsonValue>>> getMapValues(
-      const JsonValue& input) const override {
-    if (!input.isObject()) {
-      return DataResult<std::vector<std::pair<JsonValue, JsonValue>>>::error("Not a JSON object: " +
-                                                                            input.dump());
+  DataResult<std::vector<std::pair<Value, Value>>> getMapValues(
+      const Value& input) const override {
+    const JsonValue::Raw* node = requireNode(input);
+    if (!node->is_object()) {
+      return DataResult<std::vector<std::pair<Value, Value>>>::error("Not a JSON object: " +
+                                                                         node->dump());
     }
-    std::vector<std::pair<JsonValue, JsonValue>> out;
-    out.reserve(input.size());
-    for (const auto& entry : input.asObject()) {
-      out.emplace_back(JsonValue::string(entry.first), entry.second);
+    std::vector<std::pair<Value, Value>> out;
+    out.reserve(node->size());
+    for (auto it = node->begin(); it != node->end(); ++it) {
+      out.emplace_back(box(JsonValue::Raw(it.key())),
+                       Value::ofChild(input.owner, &it.value(), tagOf<JsonValue::Raw>()));
     }
-    return DataResult<std::vector<std::pair<JsonValue, JsonValue>>>::success(std::move(out));
+    return DataResult<std::vector<std::pair<Value, Value>>>::success(std::move(out));
   }
 
-  JsonValue createMap(const std::vector<std::pair<JsonValue, JsonValue>>& entries) const override {
-    JsonValue::Object out;
-    out.reserve(entries.size());
+  Value createMap(const std::vector<std::pair<Value, Value>>& entries) const override {
+    JsonValue::Raw out = JsonValue::Raw::object();
     for (const auto& entry : entries) {
-      const std::optional<std::string> keyString = asKeyString(entry.first);
+      const std::optional<std::string> keyString = asKeyString(*requireNode(entry.first));
       if (keyString.has_value()) {
-        putJsonMember(out, *keyString, entry.second);
+        putRawMember(out, *keyString, *requireNode(entry.second));
       }
     }
-    return JsonValue::object(std::move(out));
+    return box(std::move(out));
   }
 
   // --- list 访问 --------------------------------------------------------
-  DataResult<std::vector<JsonValue>> getStream(const JsonValue& input) const override {
-    if (!input.isArray()) {
-      return DataResult<std::vector<JsonValue>>::error("Not a json array: " + input.dump());
+  DataResult<std::vector<Value>> getStream(const Value& input) const override {
+    const JsonValue::Raw* node = requireNode(input);
+    if (!node->is_array()) {
+      return DataResult<std::vector<Value>>::error("Not a json array: " + node->dump());
     }
-    return DataResult<std::vector<JsonValue>>::success(input.asArray());
+    std::vector<Value> out;
+    out.reserve(node->size());
+    for (auto it = node->begin(); it != node->end(); ++it) {
+      // 元素只借子节点：一次引用计数拷贝（旧实现先造 JsonValue 再装箱，两次）。
+      out.push_back(Value::ofChild(input.owner, &*it, tagOf<JsonValue::Raw>()));
+    }
+    return DataResult<std::vector<Value>>::success(std::move(out));
   }
 
-  DataResult<std::vector<JsonValue>> getList(const JsonValue& input) const override {
+  DataResult<std::vector<Value>> getList(const Value& input) const override {
     return getStream(input);
   }
 
-  JsonValue createList(const std::vector<JsonValue>& values) const override {
-    return JsonValue::array(values);
+  Value createList(const std::vector<Value>& values) const override {
+    JsonValue::Raw out = JsonValue::Raw::array();
+    for (const Value& value : values) {
+      out.push_back(*requireNode(value));
+    }
+    return box(std::move(out));
   }
 
-  JsonValue remove(const JsonValue& input, const std::string& key) const override {
-    if (!input.isObject()) {
+  Value remove(const Value& input, const std::string& key) const override {
+    const JsonValue::Raw* node = requireNode(input);
+    if (!node->is_object()) {
       return input;
     }
-    JsonValue::Object out;
-    for (const auto& entry : input.asObject()) {
-      if (entry.first != key) {
-        out.push_back(entry);
+    JsonValue::Raw out = JsonValue::Raw::object();
+    for (auto it = node->begin(); it != node->end(); ++it) {
+      if (it.key() != key) {
+        out[it.key()] = it.value();
       }
     }
-    return JsonValue::object(std::move(out));
+    return box(std::move(out));
   }
 
   // --- 行为 ----------------------------------------------------------
@@ -2451,21 +2737,37 @@ class JsonOps : public DynamicOps {
     return std::make_shared<StringRecordBuilder>(*this);
   }
 
-  std::string toString() const { return "JSON"; }
-
  private:
-  // Java 的 `key.getAsString()`：字符串，或压缩模式下的数字。
-  std::optional<std::string> asKeyString(const JsonValue& key) const {
-    if (key.isString()) {
-      return key.asString();
+  // 借出节点：只读标签、不复制所有者。标签不匹配时抛，与旧的
+  // Value::asJson() 行为一致（同一个异常类型与消息）。
+  static const JsonValue::Raw* requireNode(const Value& value) {
+    const JsonValue::Raw* node = value.as<JsonValue::Raw>();
+    if (node == nullptr) {
+      throw std::logic_error("Value::asJson(): the handle does not hold a JSON node");
     }
-    if (compressed_ && key.isNumber()) {
-      return key.asNumber().toString();
+    return node;
+  }
+
+  // 把刚建好的节点装箱：一次分配、零引用计数操作（所有者直接 move 进去）。
+  static Value box(JsonValue::Raw&& node) {
+    auto owner = std::make_shared<const JsonValue::Raw>(std::move(node));
+    return Value::of<JsonValue::Raw>(std::move(owner), owner.get());
+  }
+
+  // Java 的 `key.getAsString()`：字符串，或压缩模式下的数字。
+  std::optional<std::string> asKeyString(const JsonValue::Raw& key) const {
+    if (key.is_string()) {
+      return key.get_ref<const std::string&>();
+    }
+    if (compressed_ && key.is_number()) {
+      return detail::numberOf(key).toString();
     }
     return std::nullopt;
   }
 
   bool compressed_ = false;
+  // empty() 的不变值（构造一次，之后每次返回一次引用计数拷贝）。
+  const Value empty_;
 };
 
 inline const JsonOps JsonOps::INSTANCE{false};
@@ -2513,10 +2815,10 @@ class GetterField;
 // DFU 的 Codec.ResultFunction / MapCodec.ResultFunction。
 template <class A>
 struct CodecResultFunction {
-  std::function<DataResult<std::pair<A, JsonValue>>(
-      const DynamicOps&, const JsonValue&, const DataResult<std::pair<A, JsonValue>>&)>
+  std::function<DataResult<std::pair<A, Value>>(
+      const DynamicOps&, const Value&, const DataResult<std::pair<A, Value>>&)>
       apply;
-  std::function<DataResult<JsonValue>(const DynamicOps&, const A&, const DataResult<JsonValue>&)>
+  std::function<DataResult<Value>(const DynamicOps&, const A&, const DataResult<Value>&)>
       coApply;
 };
 
@@ -2532,19 +2834,19 @@ struct MapResultFunction {
 template <class A>
 class Encoder {
  public:
-  using Fn = std::function<DataResult<JsonValue>(const A&, const DynamicOps&, const JsonValue&)>;
+  using Fn = std::function<DataResult<Value>(const A&, const DynamicOps&, const Value&)>;
 
   Encoder() = default;
   explicit Encoder(Fn fn) : fn_(std::move(fn)) {}
 
   bool valid() const { return static_cast<bool>(fn_); }
 
-  DataResult<JsonValue> encode(const A& input, const DynamicOps& ops,
-                               const JsonValue& prefix) const {
+  DataResult<Value> encode(const A& input, const DynamicOps& ops,
+                               const Value& prefix) const {
     return fn_(input, ops, prefix);
   }
 
-  DataResult<JsonValue> encodeStart(const DynamicOps& ops, const A& input) const {
+  DataResult<Value> encodeStart(const DynamicOps& ops, const A& input) const {
     return fn_(input, ops, ops.empty());
   }
 
@@ -2554,7 +2856,7 @@ class Encoder {
   Encoder<B> comap(std::function<A(const B&)> function) const {
     Fn fn = fn_;
     return Encoder<B>([fn, function](const B& input, const DynamicOps& ops,
-                                     const JsonValue& prefix) {
+                                     const Value& prefix) {
       return fn(function(input), ops, prefix);
     });
   }
@@ -2563,7 +2865,7 @@ class Encoder {
   Encoder<B> flatComap(std::function<DataResult<A>(const B&)> function) const {
     Fn fn = fn_;
     return Encoder<B>([fn, function](const B& input, const DynamicOps& ops,
-                                     const JsonValue& prefix) {
+                                     const Value& prefix) {
       return function(input).flatMap(
           [&](const A& mapped) { return fn(mapped, ops, prefix); });
     });
@@ -2572,7 +2874,7 @@ class Encoder {
   Encoder<A> withLifecycle(const Lifecycle& lifecycle) const {
     Fn fn = fn_;
     return Encoder<A>([fn, lifecycle](const A& input, const DynamicOps& ops,
-                                      const JsonValue& prefix) {
+                                      const Value& prefix) {
       return fn(input, ops, prefix).setLifecycle(lifecycle);
     });
   }
@@ -2581,8 +2883,8 @@ class Encoder {
   static MapEncoder<A> empty();
 
   static Encoder<A> error(std::string message) {
-    return Encoder<A>([message](const A&, const DynamicOps&, const JsonValue&) {
-      return DataResult<JsonValue>::error(message);
+    return Encoder<A>([message](const A&, const DynamicOps&, const Value&) {
+      return DataResult<Value>::error(message);
     });
   }
 
@@ -2597,20 +2899,20 @@ template <class A>
 class Decoder {
  public:
   using Fn =
-      std::function<DataResult<std::pair<A, JsonValue>>(const DynamicOps&, const JsonValue&)>;
+      std::function<DataResult<std::pair<A, Value>>(const DynamicOps&, const Value&)>;
 
   Decoder() = default;
   explicit Decoder(Fn fn) : fn_(std::move(fn)) {}
 
   bool valid() const { return static_cast<bool>(fn_); }
 
-  DataResult<std::pair<A, JsonValue>> decode(const DynamicOps& ops,
-                                             const JsonValue& input) const {
+  DataResult<std::pair<A, Value>> decode(const DynamicOps& ops,
+                                             const Value& input) const {
     return fn_(ops, input);
   }
 
-  DataResult<A> parse(const DynamicOps& ops, const JsonValue& input) const {
-    return decode(ops, input).map([](const std::pair<A, JsonValue>& pair) { return pair.first; });
+  DataResult<A> parse(const DynamicOps& ops, const Value& input) const {
+    return decode(ops, input).map([](const std::pair<A, Value>& pair) { return pair.first; });
   }
 
   MapDecoder<A> fieldOf(const std::string& name) const;
@@ -2618,8 +2920,8 @@ class Decoder {
   template <class B>
   Decoder<B> map(std::function<B(const A&)> function) const {
     Fn fn = fn_;
-    return Decoder<B>([fn, function](const DynamicOps& ops, const JsonValue& input) {
-      return fn(ops, input).map([&](const std::pair<A, JsonValue>& pair) {
+    return Decoder<B>([fn, function](const DynamicOps& ops, const Value& input) {
+      return fn(ops, input).map([&](const std::pair<A, Value>& pair) {
         return std::make_pair(function(pair.first), pair.second);
       });
     });
@@ -2628,8 +2930,8 @@ class Decoder {
   template <class B>
   Decoder<B> flatMap(std::function<DataResult<B>(const A&)> function) const {
     Fn fn = fn_;
-    return Decoder<B>([fn, function](const DynamicOps& ops, const JsonValue& input) {
-      return fn(ops, input).flatMap([&](const std::pair<A, JsonValue>& pair) {
+    return Decoder<B>([fn, function](const DynamicOps& ops, const Value& input) {
+      return fn(ops, input).flatMap([&](const std::pair<A, Value>& pair) {
         return function(pair.first).map([&](const B& mapped) {
           return std::make_pair(mapped, pair.second);
         });
@@ -2639,14 +2941,14 @@ class Decoder {
 
   Decoder<A> promotePartial(const ErrorHandler& onError) const {
     Fn fn = fn_;
-    return Decoder<A>([fn, onError](const DynamicOps& ops, const JsonValue& input) {
+    return Decoder<A>([fn, onError](const DynamicOps& ops, const Value& input) {
       return fn(ops, input).promotePartial(onError);
     });
   }
 
   Decoder<A> withLifecycle(const Lifecycle& lifecycle) const {
     Fn fn = fn_;
-    return Decoder<A>([fn, lifecycle](const DynamicOps& ops, const JsonValue& input) {
+    return Decoder<A>([fn, lifecycle](const DynamicOps& ops, const Value& input) {
       return fn(ops, input).setLifecycle(lifecycle);
     });
   }
@@ -2655,8 +2957,8 @@ class Decoder {
   static MapDecoder<A> unit(A value);
 
   static Decoder<A> error(std::string message) {
-    return Decoder<A>([message](const DynamicOps&, const JsonValue&) {
-      return DataResult<std::pair<A, JsonValue>>::error(message);
+    return Decoder<A>([message](const DynamicOps&, const Value&) {
+      return DataResult<std::pair<A, Value>>::error(message);
     });
   }
 
@@ -2671,7 +2973,7 @@ template <class A>
 class MapEncoder {
  public:
   using Fn = std::function<RecordBuilder&(const A&, const DynamicOps&, RecordBuilder&)>;
-  using KeysFn = std::function<std::vector<JsonValue>(const DynamicOps&)>;
+  using KeysFn = std::function<std::vector<Value>(const DynamicOps&)>;
 
   MapEncoder() = default;
   MapEncoder(Fn fn, KeysFn keys) : fn_(std::move(fn)), keys_(std::move(keys)) {}
@@ -2682,8 +2984,8 @@ class MapEncoder {
     return fn_(input, ops, prefix);
   }
 
-  std::vector<JsonValue> keys(const DynamicOps& ops) const {
-    return keys_ ? keys_(ops) : std::vector<JsonValue>{};
+  std::vector<Value> keys(const DynamicOps& ops) const {
+    return keys_ ? keys_(ops) : std::vector<Value>{};
   }
 
   // MapEncoder.compressedBuilder：遵循 DynamicOps.compressMaps()。
@@ -2691,7 +2993,7 @@ class MapEncoder {
 
   Encoder<A> encoder() const {
     MapEncoder<A> self = *this;
-    return Encoder<A>([self](const A& input, const DynamicOps& ops, const JsonValue& prefix) {
+    return Encoder<A>([self](const A& input, const DynamicOps& ops, const Value& prefix) {
       return self.encode(input, ops, *self.compressedBuilder(ops)).build(prefix);
     });
   }
@@ -2739,7 +3041,7 @@ class MapEncoder {
         [](const A&, const DynamicOps&, RecordBuilder& prefix) -> RecordBuilder& {
           return prefix;
         },
-        [](const DynamicOps&) { return std::vector<JsonValue>{}; });
+        [](const DynamicOps&) { return std::vector<Value>{}; });
   }
 
  private:
@@ -2754,7 +3056,7 @@ template <class A>
 class MapDecoder {
  public:
   using Fn = std::function<DataResult<A>(const DynamicOps&, const MapLike&)>;
-  using KeysFn = std::function<std::vector<JsonValue>(const DynamicOps&)>;
+  using KeysFn = std::function<std::vector<Value>(const DynamicOps&)>;
 
   MapDecoder() = default;
   MapDecoder(Fn fn, KeysFn keys) : fn_(std::move(fn)), keys_(std::move(keys)) {}
@@ -2763,15 +3065,15 @@ class MapDecoder {
 
   DataResult<A> decode(const DynamicOps& ops, const MapLike& input) const { return fn_(ops, input); }
 
-  std::vector<JsonValue> keys(const DynamicOps& ops) const {
-    return keys_ ? keys_(ops) : std::vector<JsonValue>{};
+  std::vector<Value> keys(const DynamicOps& ops) const {
+    return keys_ ? keys_(ops) : std::vector<Value>{};
   }
 
   // MapDecoder.compressedDecode：当 ops 要求 map 压缩时读取压缩的键列表，
   // 否则从对象视图解码。
-  DataResult<A> compressedDecode(const DynamicOps& ops, const JsonValue& input) const {
+  DataResult<A> compressedDecode(const DynamicOps& ops, const Value& input) const {
     if (ops.compressMaps()) {
-      const DataResult<std::vector<JsonValue>> listResult = ops.getList(input);
+      const DataResult<std::vector<Value>> listResult = ops.getList(input);
       if (listResult.isError()) {
         return DataResult<A>::error("Input is not a list");
       }
@@ -2785,7 +3087,7 @@ class MapDecoder {
 
   Decoder<A> decoder() const {
     MapDecoder<A> self = *this;
-    return Decoder<A>([self](const DynamicOps& ops, const JsonValue& input) {
+    return Decoder<A>([self](const DynamicOps& ops, const Value& input) {
       return self.compressedDecode(ops, input).map([&input](const A& value) {
         return std::make_pair(value, input);
       });
@@ -2825,7 +3127,7 @@ class MapDecoder {
   static MapDecoder<A> unit(A value) {
     return MapDecoder<A>(
         [value](const DynamicOps&, const MapLike&) { return DataResult<A>::success(value); },
-        [](const DynamicOps&) { return std::vector<JsonValue>{}; });
+        [](const DynamicOps&) { return std::vector<Value>{}; });
   }
 
  private:
@@ -2853,9 +3155,9 @@ class MapCodec {
   bool valid() const { return encoder_.valid() || decoder_.valid(); }
 
   // MapCodec.keys = Stream.concat(encoder.keys(ops), decoder.keys(ops))
-  std::vector<JsonValue> keys(const DynamicOps& ops) const {
-    std::vector<JsonValue> out = encoder_.keys(ops);
-    const std::vector<JsonValue> decoderKeys = decoder_.keys(ops);
+  std::vector<Value> keys(const DynamicOps& ops) const {
+    std::vector<Value> out = encoder_.keys(ops);
+    const std::vector<Value> decoderKeys = decoder_.keys(ops);
     out.insert(out.end(), decoderKeys.begin(), decoderKeys.end());
     return out;
   }
@@ -2868,7 +3170,7 @@ class MapCodec {
     return encoder_.encode(input, ops, prefix);
   }
 
-  DataResult<A> compressedDecode(const DynamicOps& ops, const JsonValue& input) const {
+  DataResult<A> compressedDecode(const DynamicOps& ops, const Value& input) const {
     return decoder_.compressedDecode(ops, input);
   }
 
@@ -2971,7 +3273,7 @@ class MapCodec {
             [supplier](const DynamicOps&, const MapLike&) {
               return DataResult<A>::success(supplier());
             },
-            [](const DynamicOps&) { return std::vector<JsonValue>{}; }),
+            [](const DynamicOps&) { return std::vector<Value>{}; }),
         "UnitMapCodec");
   }
 
@@ -3013,20 +3315,20 @@ class Codec {
   // 当此 codec 由 MapCodec 支撑时非 null（供 dispatch 使用）。
   const MapCodec<A>* mapCodec() const { return mapCodec_.get(); }
 
-  DataResult<std::pair<A, JsonValue>> decode(const DynamicOps& ops, const JsonValue& input) const {
+  DataResult<std::pair<A, Value>> decode(const DynamicOps& ops, const Value& input) const {
     return decoder_.decode(ops, input);
   }
 
-  DataResult<A> parse(const DynamicOps& ops, const JsonValue& input) const {
+  DataResult<A> parse(const DynamicOps& ops, const Value& input) const {
     return decoder_.parse(ops, input);
   }
 
-  DataResult<JsonValue> encode(const A& input, const DynamicOps& ops,
-                               const JsonValue& prefix) const {
+  DataResult<Value> encode(const A& input, const DynamicOps& ops,
+                               const Value& prefix) const {
     return encoder_.encode(input, ops, prefix);
   }
 
-  DataResult<JsonValue> encodeStart(const DynamicOps& ops, const A& input) const {
+  DataResult<Value> encodeStart(const DynamicOps& ops, const A& input) const {
     return encoder_.encodeStart(ops, input);
   }
 
@@ -3089,10 +3391,10 @@ class Codec {
     const Decoder<A> decoder = decoder_;
     return Codec<A>(
         Encoder<A>([encoder, function](const A& input, const DynamicOps& ops,
-                                       const JsonValue& prefix) {
+                                       const Value& prefix) {
           return function.coApply(ops, input, encoder.encode(input, ops, prefix));
         }),
-        Decoder<A>([decoder, function](const DynamicOps& ops, const JsonValue& input) {
+        Decoder<A>([decoder, function](const DynamicOps& ops, const Value& input) {
           return function.apply(ops, input, decoder.decode(ops, input));
         }),
         name_ + "[mapResult]");
@@ -3100,27 +3402,27 @@ class Codec {
 
   Codec<A> orElse(A value) const {
     CodecResultFunction<A> function;
-    function.apply = [value](const DynamicOps&, const JsonValue& input,
-                             const DataResult<std::pair<A, JsonValue>>& result) {
-      const std::optional<std::pair<A, JsonValue>> resolved = result.result();
-      return DataResult<std::pair<A, JsonValue>>::success(
+    function.apply = [value](const DynamicOps&, const Value& input,
+                             const DataResult<std::pair<A, Value>>& result) {
+      const std::optional<std::pair<A, Value>> resolved = result.result();
+      return DataResult<std::pair<A, Value>>::success(
           resolved.has_value() ? *resolved : std::make_pair(value, input));
     };
     function.coApply = [](const DynamicOps&, const A&,
-                          const DataResult<JsonValue>& result) { return result; };
+                          const DataResult<Value>& result) { return result; };
     return mapResult(function);
   }
 
   Codec<A> orElseGet(std::function<A()> supplier) const {
     CodecResultFunction<A> function;
-    function.apply = [supplier](const DynamicOps&, const JsonValue& input,
-                                const DataResult<std::pair<A, JsonValue>>& result) {
-      const std::optional<std::pair<A, JsonValue>> resolved = result.result();
-      return DataResult<std::pair<A, JsonValue>>::success(
+    function.apply = [supplier](const DynamicOps&, const Value& input,
+                                const DataResult<std::pair<A, Value>>& result) {
+      const std::optional<std::pair<A, Value>> resolved = result.result();
+      return DataResult<std::pair<A, Value>>::success(
           resolved.has_value() ? *resolved : std::make_pair(supplier(), input));
     };
     function.coApply = [](const DynamicOps&, const A&,
-                          const DataResult<JsonValue>& result) { return result; };
+                          const DataResult<Value>& result) { return result; };
     return mapResult(function);
   }
 
@@ -3187,7 +3489,7 @@ inline MapEncoder<A> Encoder<A>::fieldOf(const std::string& name) const {
       [self, name](const A& input, const DynamicOps& ops, RecordBuilder& prefix) -> RecordBuilder& {
         return prefix.add(name, self.encodeStart(ops, input));
       },
-      [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; });
+      [name](const DynamicOps& ops) { return std::vector<Value>{ops.createString(name)}; });
 }
 
 template <class A>
@@ -3195,7 +3497,7 @@ inline MapDecoder<A> Decoder<A>::fieldOf(const std::string& name) const {
   const Decoder<A> self = *this;
   return MapDecoder<A>(
       [self, name](const DynamicOps& ops, const MapLike& input) -> DataResult<A> {
-        const std::optional<JsonValue> value = input.get(name);
+        const std::optional<Value> value = input.get(name);
         if (!value.has_value()) {
           // 这里也附上位置信息，这样缺失的键会读作
           // `risks[3].severity: No key severity in MapLike[...]`。
@@ -3203,7 +3505,7 @@ inline MapDecoder<A> Decoder<A>::fieldOf(const std::string& name) const {
         }
         return self.parse(ops, *value).addPath(name);
       },
-      [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; });
+      [name](const DynamicOps& ops) { return std::vector<Value>{ops.createString(name)}; });
 }
 
 template <class A>
@@ -3236,10 +3538,10 @@ MapCodec<std::optional<A>> optionalField(const std::string& name, Codec<A> eleme
             }
             return prefix.add(name, elementCodec.encodeStart(ops, *input));
           },
-          [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; }),
+          [name](const DynamicOps& ops) { return std::vector<Value>{ops.createString(name)}; }),
       MapDecoder<std::optional<A>>(
           [name, elementCodec](const DynamicOps& ops, const MapLike& input) {
-            const std::optional<JsonValue> value = input.get(name);
+            const std::optional<Value> value = input.get(name);
             if (!value.has_value()) {
               return DataResult<std::optional<A>>::success(std::optional<A>{});
             }
@@ -3250,7 +3552,7 @@ MapCodec<std::optional<A>> optionalField(const std::string& name, Codec<A> eleme
             // 存在但无效的可选字段会被当作缺失。
             return DataResult<std::optional<A>>::success(std::optional<A>{});
           },
-          [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; }),
+          [name](const DynamicOps& ops) { return std::vector<Value>{ops.createString(name)}; }),
       "OptionalFieldCodec[" + name + ": " + elementCodec.name() + "]");
 }
 
@@ -3277,11 +3579,11 @@ MapCodec<std::optional<A>> optionalFieldStrict(const std::string& name, Codec<A>
             }
             return prefix.add(name, elementCodec.encodeStart(ops, *input));
           },
-          [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; }),
+          [name](const DynamicOps& ops) { return std::vector<Value>{ops.createString(name)}; }),
       MapDecoder<std::optional<A>>(
           [name, elementCodec, where](const DynamicOps& ops,
                                       const MapLike& input) -> DataResult<std::optional<A>> {
-            const std::optional<JsonValue> value = input.get(name);
+            const std::optional<Value> value = input.get(name);
             if (!value.has_value()) {
               return DataResult<std::optional<A>>::success(std::optional<A>{});
             }
@@ -3293,7 +3595,7 @@ MapCodec<std::optional<A>> optionalFieldStrict(const std::string& name, Codec<A>
             }
             return parsed;
           },
-          [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; }),
+          [name](const DynamicOps& ops) { return std::vector<Value>{ops.createString(name)}; }),
       "StrictOptionalFieldCodec[" + name + ": " + elementCodec.name() + "]");
 }
 
@@ -3405,10 +3707,10 @@ template <class A, class ReadFn, class WriteFn>
 Codec<A> primitiveCodec(std::string name, ReadFn read, WriteFn write,
                         SourceLocation where = SourceLocation::current()) {
   Encoder<A> encoder([write, name, where](const A& input, const DynamicOps& ops,
-                                          const JsonValue& prefix) {
+                                          const Value& prefix) {
     return ops.mergeToPrimitive(prefix, write(ops, input)).addFrame(name, where);
   });
-  Decoder<A> decoder([read, name, where](const DynamicOps& ops, const JsonValue& input) {
+  Decoder<A> decoder([read, name, where](const DynamicOps& ops, const Value& input) {
     return read(ops, input)
         .map([&](const A& value) { return std::make_pair(value, ops.empty()); })
         .addFrame(name, where);
@@ -3422,13 +3724,13 @@ namespace codecs {
 
 // Codec.BOOL
 inline const Codec<bool> Bool = detail::primitiveCodec<bool>(
-    "Bool", [](const DynamicOps& ops, const JsonValue& input) { return ops.getBooleanValue(input); },
+    "Bool", [](const DynamicOps& ops, const Value& input) { return ops.getBooleanValue(input); },
     [](const DynamicOps& ops, const bool& value) { return ops.createBoolean(value); });
 
 // Codec.BYTE
 inline const Codec<int8_t> Byte = detail::primitiveCodec<int8_t>(
     "Byte",
-    [](const DynamicOps& ops, const JsonValue& input) {
+    [](const DynamicOps& ops, const Value& input) {
       return ops.getNumberValue(input).map([](const Number& n) { return n.byteValue(); });
     },
     [](const DynamicOps& ops, const int8_t& value) { return ops.createByte(value); });
@@ -3436,7 +3738,7 @@ inline const Codec<int8_t> Byte = detail::primitiveCodec<int8_t>(
 // Codec.SHORT
 inline const Codec<int16_t> Short = detail::primitiveCodec<int16_t>(
     "Short",
-    [](const DynamicOps& ops, const JsonValue& input) {
+    [](const DynamicOps& ops, const Value& input) {
       return ops.getNumberValue(input).map([](const Number& n) { return n.shortValue(); });
     },
     [](const DynamicOps& ops, const int16_t& value) { return ops.createShort(value); });
@@ -3444,7 +3746,7 @@ inline const Codec<int16_t> Short = detail::primitiveCodec<int16_t>(
 // Codec.INT
 inline const Codec<int32_t> Int = detail::primitiveCodec<int32_t>(
     "Int",
-    [](const DynamicOps& ops, const JsonValue& input) {
+    [](const DynamicOps& ops, const Value& input) {
       return ops.getNumberValue(input).map([](const Number& n) { return n.intValue(); });
     },
     [](const DynamicOps& ops, const int32_t& value) { return ops.createInt(value); });
@@ -3452,7 +3754,7 @@ inline const Codec<int32_t> Int = detail::primitiveCodec<int32_t>(
 // Codec.LONG
 inline const Codec<int64_t> Long = detail::primitiveCodec<int64_t>(
     "Long",
-    [](const DynamicOps& ops, const JsonValue& input) {
+    [](const DynamicOps& ops, const Value& input) {
       return ops.getNumberValue(input).map([](const Number& n) { return n.longValue(); });
     },
     [](const DynamicOps& ops, const int64_t& value) { return ops.createLong(value); });
@@ -3460,7 +3762,7 @@ inline const Codec<int64_t> Long = detail::primitiveCodec<int64_t>(
 // Codec.FLOAT
 inline const Codec<float> Float = detail::primitiveCodec<float>(
     "Float",
-    [](const DynamicOps& ops, const JsonValue& input) {
+    [](const DynamicOps& ops, const Value& input) {
       return ops.getNumberValue(input).map([](const Number& n) { return n.floatValue(); });
     },
     [](const DynamicOps& ops, const float& value) { return ops.createFloat(value); });
@@ -3468,7 +3770,7 @@ inline const Codec<float> Float = detail::primitiveCodec<float>(
 // Codec.DOUBLE
 inline const Codec<double> Double = detail::primitiveCodec<double>(
     "Double",
-    [](const DynamicOps& ops, const JsonValue& input) {
+    [](const DynamicOps& ops, const Value& input) {
       return ops.getNumberValue(input).map([](const Number& n) { return n.doubleValue(); });
     },
     [](const DynamicOps& ops, const double& value) { return ops.createDouble(value); });
@@ -3476,29 +3778,41 @@ inline const Codec<double> Double = detail::primitiveCodec<double>(
 // Codec.STRING
 inline const Codec<std::string> String = detail::primitiveCodec<std::string>(
     "String",
-    [](const DynamicOps& ops, const JsonValue& input) { return ops.getStringValue(input); },
+    [](const DynamicOps& ops, const Value& input) { return ops.getStringValue(input); },
     [](const DynamicOps& ops, const std::string& value) { return ops.createString(value); });
 
 // Codec.PASSTHROUGH -- 把原始动态值原样透传。
+//
+// 阶段 1：它仍然是 `Codec<JsonValue>`（用户侧字段类型不变，`models/risk_def.hpp`
+// 不用改），内部靠 `JsonValue → Value` 的隐式装箱与 `Value::asJson()` 往返；
+// 阶段 2 会换成 `Codec<Dynamic>`（DFU 的 Codec.PASSTHROUGH 就是 Codec<Dynamic<?>>）。
+// 因此这一版 Passthrough 只能配 JsonOps 使用。
 inline const Codec<JsonValue> Passthrough = Codec<JsonValue>::of(
-    Encoder<JsonValue>([](const JsonValue& input, const DynamicOps& ops, const JsonValue& prefix) {
-      if (prefix == ops.empty()) {
-        return DataResult<JsonValue>::success(input, Lifecycle::experimental());
+    Encoder<JsonValue>([](const JsonValue& input, const DynamicOps& ops, const Value& prefix) {
+      if (ops.valueEquals(prefix, ops.empty())) {
+        return DataResult<Value>::success(Value(input), Lifecycle::experimental());
       }
       if (input.isObject()) {
         const JsonObjectMapLike map(input);
         return ops.mergeToMap(prefix, map);
       }
       if (input.isArray()) {
-        return ops.mergeToList(prefix, input.asArray());
+        // asArray() 是 vector<JsonValue>，合并前逐个装箱（只复制所有者）。
+        const JsonValue::Array elements = input.asArray();
+        std::vector<Value> boxed;
+        boxed.reserve(elements.size());
+        for (const JsonValue& element : elements) {
+          boxed.push_back(element);
+        }
+        return ops.mergeToList(prefix, boxed);
       }
-      return DataResult<JsonValue>::error(
-          "Don't know how to merge " + prefix.dump() + " and " + input.dump(), prefix,
-          Lifecycle::experimental());
+      return DataResult<Value>::error(
+          "Don't know how to merge " + ops.toString(prefix) + " and " + ops.toString(Value(input)),
+          prefix, Lifecycle::experimental());
     }),
-    Decoder<JsonValue>([](const DynamicOps& ops, const JsonValue& input) {
-      return DataResult<std::pair<JsonValue, JsonValue>>::success(
-          std::make_pair(input, ops.empty()));
+    Decoder<JsonValue>([](const DynamicOps& ops, const Value& input) {
+      return DataResult<std::pair<JsonValue, Value>>::success(
+          std::make_pair(input.asJson(), ops.empty()));
     }),
     "passthrough");
 
@@ -3561,7 +3875,7 @@ Codec<std::vector<A>> listOf(const Codec<A>& elementCodec,
                              SourceLocation where = SourceLocation::current()) {
   Encoder<std::vector<A>> encoder([elementCodec, where](const std::vector<A>& input,
                                                         const DynamicOps& ops,
-                                                        const JsonValue& prefix) {
+                                                        const Value& prefix) {
     const std::shared_ptr<ListBuilder> builder = ops.listBuilder();
     int32_t index = 0;
     for (const A& element : input) {
@@ -3574,32 +3888,32 @@ Codec<std::vector<A>> listOf(const Codec<A>& elementCodec,
 
   Decoder<std::vector<A>> decoder(
       [elementCodec, where](const DynamicOps& ops,
-                            const JsonValue& input)
-          -> DataResult<std::pair<std::vector<A>, JsonValue>> {
+                            const Value& input)
+          -> DataResult<std::pair<std::vector<A>, Value>> {
     return ops.getList(input)
         .setLifecycle(Lifecycle::stable())
-        .flatMap([&](const std::vector<JsonValue>& values)
-                     -> DataResult<std::pair<std::vector<A>, JsonValue>> {
+        .flatMap([&](const std::vector<Value>& values)
+                     -> DataResult<std::pair<std::vector<A>, Value>> {
           std::vector<A> elements;
-          std::vector<JsonValue> failed;
+          std::vector<Value> failed;
           DataResult<Unit> result = DataResult<Unit>::success(Unit{}, Lifecycle::stable());
           for (size_t i = 0; i < values.size(); ++i) {
-            const JsonValue& value = values[i];
+            const Value& value = values[i];
             // 失败的元素用它的下标定位：`or[0]: ...`。
-            const DataResult<std::pair<A, JsonValue>> element =
+            const DataResult<std::pair<A, Value>> element =
                 elementCodec.decode(ops, value).addPath(static_cast<int32_t>(i));
             if (element.isError()) {
               failed.push_back(value);
             }
             result = result.apply2stable(
-                [&](const Unit& unit, const std::pair<A, JsonValue>& decoded) {
+                [&](const Unit& unit, const std::pair<A, Value>& decoded) {
                   elements.push_back(decoded.first);
                   return unit;
                 },
                 element);
           }
-          const JsonValue errors = ops.createList(failed);
-          const std::pair<std::vector<A>, JsonValue> pair(elements, errors);
+          const Value errors = ops.createList(failed);
+          const std::pair<std::vector<A>, Value> pair(elements, errors);
           return result.map([&](const Unit&) { return pair; })
               .setPartial(pair)
               .addFrame("list", where);
@@ -3624,22 +3938,22 @@ Codec<Either<F, S>> either(const Codec<F>& first, const Codec<S>& second,
                            SourceLocation where = SourceLocation::current()) {
   Encoder<Either<F, S>> encoder([first, second](const Either<F, S>& input,
                                                const DynamicOps& ops,
-                                               const JsonValue& prefix) {
+                                               const Value& prefix) {
     return input.isLeft() ? first.encode(input.left(), ops, prefix)
                           : second.encode(input.right(), ops, prefix);
   });
 
   Decoder<Either<F, S>> decoder([first, second, where](const DynamicOps& ops,
-                                                       const JsonValue& input) {
-    const DataResult<std::pair<Either<F, S>, JsonValue>> firstRead =
-        first.decode(ops, input).map([](const std::pair<F, JsonValue>& pair) {
+                                                       const Value& input) {
+    const DataResult<std::pair<Either<F, S>, Value>> firstRead =
+        first.decode(ops, input).map([](const std::pair<F, Value>& pair) {
           return std::make_pair(Either<F, S>::left(pair.first), pair.second);
         });
     if (firstRead.result().has_value()) {
       return firstRead;
     }
     return second.decode(ops, input)
-        .map([](const std::pair<S, JsonValue>& pair) {
+        .map([](const std::pair<S, Value>& pair) {
           return std::make_pair(Either<F, S>::right(pair.first), pair.second);
         })
         .addFrame("either", where);
@@ -3658,16 +3972,16 @@ Codec<std::pair<F, S>> pair(const Codec<F>& first, const Codec<S>& second,
                             SourceLocation where = SourceLocation::current()) {
   Encoder<std::pair<F, S>> encoder([first, second](const std::pair<F, S>& value,
                                                   const DynamicOps& ops,
-                                                  const JsonValue& rest) {
+                                                  const Value& rest) {
     return second.encode(value.second, ops, rest).flatMap(
-        [&](const JsonValue& encoded) { return first.encode(value.first, ops, encoded); });
+        [&](const Value& encoded) { return first.encode(value.first, ops, encoded); });
   });
 
   Decoder<std::pair<F, S>> decoder([first, second, where](const DynamicOps& ops,
-                                                          const JsonValue& input) {
+                                                          const Value& input) {
     return first.decode(ops, input)
-        .flatMap([&](const std::pair<F, JsonValue>& p1) {
-          return second.decode(ops, p1.second).map([&](const std::pair<S, JsonValue>& p2) {
+        .flatMap([&](const std::pair<F, Value>& p1) {
+          return second.decode(ops, p1.second).map([&](const std::pair<S, Value>& p2) {
             return std::make_pair(std::make_pair(p1.first, p2.first), p2.second);
           });
         })
@@ -3692,7 +4006,7 @@ Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec,
 
   Encoder<Entries> encoder([keyCodec, elementCodec, where](const Entries& input,
                                                            const DynamicOps& ops,
-                                                           const JsonValue& prefix) {
+                                                           const Value& prefix) {
     const std::shared_ptr<RecordBuilder> builder = ops.mapBuilder();
     for (const Entry& entry : input) {
       builder->add(keyCodec.encodeStart(ops, entry.first), elementCodec.encodeStart(ops, entry.second));
@@ -3701,17 +4015,21 @@ Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec,
   });
 
   Decoder<Entries> decoder([keyCodec, elementCodec, where](const DynamicOps& ops,
-                                                           const JsonValue& input)
-      -> DataResult<std::pair<Entries, JsonValue>> {
+                                                           const Value& input)
+      -> DataResult<std::pair<Entries, Value>> {
     return ops.getMap(input).setLifecycle(Lifecycle::stable()).flatMap(
-        [&](const MapLikePtr& map) -> DataResult<std::pair<Entries, JsonValue>> {
+        [&](const MapLikePtr& map) -> DataResult<std::pair<Entries, Value>> {
           Entries elements;
-          std::vector<std::pair<JsonValue, JsonValue>> failed;
+          std::vector<std::pair<Value, Value>> failed;
           DataResult<Unit> result = DataResult<Unit>::success(Unit{}, Lifecycle::stable());
           for (const auto& entry : map->entries()) {
             // 用键定位出错的条目（非字符串键则用它的位置）。
-            const bool stringKey = entry.first.isString();
-            const std::string_view keyText = stringKey ? entry.first.asString() : std::string_view();
+            // Phase 1：这里仍按 JSON 判断"键是不是字符串"（压缩 ops 下数字键
+            // 走的正是位置分支）。接第二种格式时应当改成 ops 级别的询问。
+            const JsonValue::Raw* keyNode = entry.first.as<JsonValue::Raw>();
+            const bool stringKey = keyNode != nullptr && keyNode->is_string();
+            const std::string_view keyText =
+                stringKey ? keyNode->get_ref<const std::string&>() : std::string_view();
             const int32_t entryIndex = static_cast<int32_t>(failed.size());
             DataResult<K> key = keyCodec.parse(ops, entry.first);
             DataResult<V> value = elementCodec.parse(ops, entry.second);
@@ -3742,12 +4060,12 @@ Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec,
                 },
                 decoded);
           }
-          const JsonValue errors = ops.createMap(failed);
-          const std::pair<Entries, JsonValue> pair(elements, errors);
+          const Value errors = ops.createMap(failed);
+          const std::pair<Entries, Value> pair(elements, errors);
           return result.map([&](const Unit&) { return pair; })
               .setPartial(pair)
               .mapError([&](const std::string& message) {
-                return message + " missed input: " + errors.dump();
+                return message + " missed input: " + ops.toString(errors);
               })
               .addFrame("unboundedMap", where);
         });
@@ -3824,10 +4142,10 @@ Codec<A> recursive(std::function<Codec<A>()> supplier) {
     return *state->cached;
   };
 
-  Encoder<A> encoder([resolve](const A& input, const DynamicOps& ops, const JsonValue& prefix) {
+  Encoder<A> encoder([resolve](const A& input, const DynamicOps& ops, const Value& prefix) {
     return resolve().encode(input, ops, prefix);
   });
-  Decoder<A> decoder([resolve](const DynamicOps& ops, const JsonValue& input) {
+  Decoder<A> decoder([resolve](const DynamicOps& ops, const Value& input) {
     return resolve().decode(ops, input);
   });
   return Codec<A>::of(std::move(encoder), std::move(decoder), "RecursiveCodec");
@@ -3842,7 +4160,7 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
                                 std::function<DataResult<Codec<V>>(const K&)> codecSelector,
                                 bool assumeMap, SourceLocation where = SourceLocation::current()) {
   const auto keys = [typeKey](const DynamicOps& ops) {
-    return std::vector<JsonValue>{ops.createString(typeKey), ops.createString("value")};
+    return std::vector<Value>{ops.createString(typeKey), ops.createString("value")};
   };
 
   const auto selectCodec = [type, codecSelector](const V& input) -> DataResult<Codec<V>> {
@@ -3860,7 +4178,7 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
           return builder;
         }
         const Codec<V> codec = *elementCodec.result();
-        const DataResult<JsonValue> typeResult = type(input).flatMap([&](const K& key) {
+        const DataResult<Value> typeResult = type(input).flatMap([&](const K& key) {
           return keyCodec.encodeStart(ops, key);
         });
         if (ops.compressMaps()) {
@@ -3873,19 +4191,20 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
           prefix.add(typeKey, typeResult);
           return prefix;
         }
-        const JsonValue typeString = ops.createString(typeKey);
-        const DataResult<JsonValue> result = codec.encodeStart(ops, input);
+        const Value typeString = ops.createString(typeKey);
+        const DataResult<Value> result = codec.encodeStart(ops, input);
         if (assumeMap) {
           const DataResult<MapLikePtr> element =
-              result.flatMap([&](const JsonValue& value) { return ops.getMap(value); });
+              result.flatMap([&](const Value& value) { return ops.getMap(value); });
           if (!element.result().has_value()) {
             return prefix.withErrorsFrom(element);
           }
           prefix.add(typeString, typeResult);
-          const std::vector<std::pair<JsonValue, JsonValue>> entries =
+          const std::vector<std::pair<Value, Value>> entries =
               (*element.result())->entries();
           for (const auto& entry : entries) {
-            if (!(entry.first == typeString)) {
+            // 用 ops 的比较，而不是假设值类型支持 ==（泛化后 Value 没有它）。
+            if (!ops.valueEquals(entry.first, typeString)) {
               prefix.add(entry.first, entry.second);
             }
           }
@@ -3900,17 +4219,17 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
   MapDecoder<V> decoder(
       [typeKey, keyCodec, codecSelector, assumeMap, where](const DynamicOps& ops,
                                                            const MapLike& input) -> DataResult<V> {
-        const std::optional<JsonValue> elementName = input.get(typeKey);
+        const std::optional<Value> elementName = input.get(typeKey);
         if (!elementName.has_value()) {
           return DataResult<V>::error("Input does not contain a key [" + typeKey + "]: " +
                                       input.toString());
         }
         DataResult<V> decodedResult = keyCodec.decode(ops, *elementName)
-            .flatMap([&](const std::pair<K, JsonValue>& decoded) -> DataResult<V> {
+            .flatMap([&](const std::pair<K, Value>& decoded) -> DataResult<V> {
               return codecSelector(decoded.first)
                   .flatMap([&](const Codec<V>& codec) -> DataResult<V> {
                     if (ops.compressMaps()) {
-                      const std::optional<JsonValue> value = input.get(ops.createString("value"));
+                      const std::optional<Value> value = input.get(ops.createString("value"));
                       if (!value.has_value()) {
                         return DataResult<V>::error("Input does not have a \"value\" entry: " +
                                                     input.toString())
@@ -3924,9 +4243,9 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
                     }
                     if (assumeMap) {
                       return codec.decode(ops, ops.createMap(input.entries()))
-                          .map([](const std::pair<V, JsonValue>& pair) { return pair.first; });
+                          .map([](const std::pair<V, Value>& pair) { return pair.first; });
                     }
-                    const std::optional<JsonValue> value = input.get("value");
+                    const std::optional<Value> value = input.get("value");
                     if (!value.has_value()) {
                       return DataResult<V>::error("Input does not have a \"value\" entry: " +
                                                   input.toString())
@@ -4246,23 +4565,23 @@ O buildFromResults(const Ctor& ctor, const Tuple& results, std::index_sequence<I
   return ctor(*std::get<I>(results).valueOrPartial()...);
 }
 
-inline void appendKeys(std::vector<JsonValue>& out, std::vector<JsonValue> keys) {
+inline void appendKeys(std::vector<Value>& out, std::vector<Value> keys) {
   out.insert(out.end(), std::make_move_iterator(keys.begin()), std::make_move_iterator(keys.end()));
 }
 
 template <class FieldsTuple, std::size_t... I>
-std::vector<JsonValue> fieldEncoderKeys(const FieldsTuple& fields, const DynamicOps& ops,
+std::vector<Value> fieldEncoderKeys(const FieldsTuple& fields, const DynamicOps& ops,
                                         std::index_sequence<I...>) {
-  std::vector<JsonValue> out;
+  std::vector<Value> out;
   (void)std::initializer_list<int>{
       (appendKeys(out, std::get<I>(fields).codec().encoder().keys(ops)), 0)...};
   return out;
 }
 
 template <class FieldsTuple, std::size_t... I>
-std::vector<JsonValue> fieldDecoderKeys(const FieldsTuple& fields, const DynamicOps& ops,
+std::vector<Value> fieldDecoderKeys(const FieldsTuple& fields, const DynamicOps& ops,
                                         std::index_sequence<I...>) {
-  std::vector<JsonValue> out;
+  std::vector<Value> out;
   (void)std::initializer_list<int>{
       (appendKeys(out, std::get<I>(fields).codec().decoder().keys(ops)), 0)...};
   return out;

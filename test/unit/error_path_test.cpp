@@ -36,6 +36,7 @@ using codec::DynamicOps;
 using codec::FrameStyle;
 using codec::JsonOps;
 using codec::JsonValue;
+using codec::Value;
 
 // --- a small model with the same nesting as the reported case ---------------
 
@@ -113,14 +114,14 @@ TEST(ErrorPathTest, WordingCanBeRewrittenWhileKeepingTheLocation) {
   // If you prefer "expected string, got number" to DFU's "Not a string: 1", rewrite
   // the leaf codec with mapResult (DFU's result function); the location survives.
   CodecResultFunction<std::string> rewriteWording;
-  rewriteWording.apply = [](const DynamicOps&, const JsonValue&,
-                            const DataResult<std::pair<std::string, JsonValue>>& result) {
+  rewriteWording.apply = [](const DynamicOps&, const Value&,
+                            const DataResult<std::pair<std::string, Value>>& result) {
     return result.mapError([](const std::string&) {
       return std::string("expected string, got number");
     });
   };
   rewriteWording.coApply = [](const DynamicOps&, const std::string&,
-                              const DataResult<JsonValue>& result) { return result; };
+                              const DataResult<Value>& result) { return result; };
 
   const Codec<std::string> expectedString = codec::codecs::String.mapResult(rewriteWording);
   const DataResult<Document> result =
@@ -269,7 +270,7 @@ TEST(ErrorPathTest, EncodeFailuresCarryTheirFieldToo) {
   const Codec<Holder> codec =
       codec::recordCodec<Holder>(codec::fieldOf("small", &Holder::small, bounded));
 
-  const DataResult<JsonValue> encoded = codec.encodeStart(JsonOps::INSTANCE, Holder{200});
+  const DataResult<Value> encoded = codec.encodeStart(JsonOps::INSTANCE, Holder{200});
   ASSERT_TRUE(encoded.isError());
   EXPECT_EQ(encoded.message(), "too large to encode: 200");
   EXPECT_EQ(encoded.describe(), "small: too large to encode: 200");
@@ -470,7 +471,7 @@ TEST(FrameTest, EncodeFailuresKeepTheirCodecChain) {
         return DataResult<int32_t>::success(value);
       });
 
-  const DataResult<JsonValue> encoded =
+  const DataResult<Value> encoded =
       codec::listOf(bounded).encodeStart(JsonOps::INSTANCE, std::vector<int32_t>{1, 200});
   ASSERT_TRUE(encoded.isError());
   // The rejected element has no codec of its own to name (flatComapMap replaces the

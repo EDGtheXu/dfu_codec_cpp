@@ -12,6 +12,7 @@ using codec::DynamicOps;
 using codec::Either;
 using codec::JsonOps;
 using codec::JsonValue;
+using codec::Value;
 using codec::Lifecycle;
 using codec::MapCodec;
 using codec::codecs::Bool;
@@ -78,7 +79,7 @@ TEST(CodecCombinatorTest, ComapFlatMapAndFlatComapMap) {
         return DataResult<int32_t>::success(value);
       });
   EXPECT_EQ(decode(bounded, "50"), 50);
-  const DataResult<JsonValue> tooLarge = bounded.encodeStart(JsonOps::INSTANCE, 200);
+  const DataResult<Value> tooLarge = bounded.encodeStart(JsonOps::INSTANCE, 200);
   ASSERT_TRUE(tooLarge.isError());
   EXPECT_EQ(tooLarge.message(), "too large to encode: 200");
 }
@@ -111,12 +112,12 @@ TEST(CodecCombinatorTest, PromotePartialTurnsFailedElementsIntoASuccess) {
 
 TEST(CodecCombinatorTest, MapResultCanRewriteErrors) {
   CodecResultFunction<int32_t> function;
-  function.apply = [](const DynamicOps&, const JsonValue&,
-                      const DataResult<std::pair<int32_t, JsonValue>>& result) {
+  function.apply = [](const DynamicOps&, const Value&,
+                      const DataResult<std::pair<int32_t, Value>>& result) {
     return result.mapError([](const std::string& message) { return "E:" + message; });
   };
   function.coApply = [](const DynamicOps&, const int32_t&,
-                        const DataResult<JsonValue>& result) { return result; };
+                        const DataResult<Value>& result) { return result; };
 
   const Codec<int32_t> wrapped = Int.mapResult(function);
   EXPECT_EQ(wrapped.parse(JsonOps::INSTANCE, json("1")).result().value(), 1);
@@ -159,6 +160,7 @@ TEST(EitherCodecTest, ReportsTheSecondFailureWhenNeitherMatches) {
 }
 
 TEST(PairCodecTest, ChainsCodecsOverTheRemainingPrefix) {
+  // Passthrough 在阶段 1 仍是 Codec<JsonValue>，两条都保留 JsonValue。
   const Codec<std::pair<JsonValue, JsonValue>> codec = codec::pair(Passthrough, Passthrough);
   const std::pair<JsonValue, JsonValue> expected{json("1"), json("null")};
   // The first codec consumes the input, the second reads the first one's rest
@@ -179,16 +181,16 @@ TEST(ListCodecTest, FailedElementsAreReportedInThePartialResult) {
   const Codec<std::vector<int32_t>> codec = codec::listOf(Int);
   // Codec::decode keeps the ListCodec pair: the decoded prefix plus the list of
   // raw elements that failed.
-  const DataResult<std::pair<std::vector<int32_t>, JsonValue>> decoded =
+  const DataResult<std::pair<std::vector<int32_t>, Value>> decoded =
       codec.decode(JsonOps::INSTANCE, json("[1,\"x\",3]"));
   ASSERT_TRUE(decoded.isError());
   EXPECT_EQ(decoded.message(), "Not a number: \"x\"");
   ASSERT_TRUE(decoded.valueOrPartial().has_value());
-  const std::pair<std::vector<int32_t>, JsonValue>& partial = *decoded.valueOrPartial();
+  const std::pair<std::vector<int32_t>, Value>& partial = *decoded.valueOrPartial();
   // Only the elements up to the first failure are kept...
   EXPECT_EQ(partial.first, std::vector<int32_t>{1});
   // ... and the offending raw values are collected as the "remaining" value.
-  EXPECT_EQ(partial.second.dump(), "[\"x\"]");
+  EXPECT_EQ(partial.second.asJson().dump(), "[\"x\"]");
 
   // Codec::parse projects the pair onto its first component, so the partial
   // value of the failing parse is the vector itself.
@@ -268,7 +270,7 @@ TEST(CodecFieldTest, FieldOfReadsAndWritesAMember) {
 
   const std::shared_ptr<codec::RecordBuilder> builder = JsonOps::INSTANCE.mapBuilder();
   field.encode("x", JsonOps::INSTANCE, *builder);
-  EXPECT_EQ(builder->build(JsonOps::INSTANCE.empty()).result()->dump(), R"({"name":"x"})");
+  EXPECT_EQ(builder->build(JsonOps::INSTANCE.empty()).result()->asJson().dump(), R"({"name":"x"})");
 }
 
 TEST(CodecFieldTest, OptionalFieldTreatsInvalidValuesAsAbsent) {

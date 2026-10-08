@@ -398,7 +398,8 @@ TEST(PerfTest, StrategiesAgreeOnTheFixture) {
     EXPECT_EQ(risk::riskDocumentCodec()
                   .encodeStart(codec::JsonOps::INSTANCE, viaCodec)
                   .result()
-                  ->dump(),
+                  ->asJson()
+                  .dump(),
               buildManually(viaCodec).dump())
         << fixture.name;
     // nlohmann's to_json conversion must produce the same document too.
@@ -407,7 +408,8 @@ TEST(PerfTest, StrategiesAgreeOnTheFixture) {
               risk::riskDocumentCodec()
                   .encodeStart(codec::JsonOps::INSTANCE, viaCodec)
                   .result()
-                  ->dump())
+                  ->asJson()
+                  .dump())
         << fixture.name;
   }
 }
@@ -484,7 +486,7 @@ void runComparison(const Fixture& fixture) {
     const Measurement codecEncode = measure("codec encode + dump", [&] {
       g_sink += documentCodec.encodeStart(codec::JsonOps::INSTANCE, expected)
                     .result()
-                    ->dump()
+                    ->asJson().dump()
                     .size();
     });
     const Measurement manualEncode = measure("manual build + dump", [&] {

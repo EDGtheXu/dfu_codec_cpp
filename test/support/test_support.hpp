@@ -14,6 +14,11 @@ namespace testing {
 
 inline JsonValue json(const std::string& text) { return JsonValue::parse(text); }
 
+// 阶段 1：ops 层收发类型擦除的句柄 codec::Value（JsonValue 仍是 JSON 的 DOM）。
+// 测试里要读 JSON 文本时用这两个小工具，避免到处写 .asJson()。
+inline std::string dumpJson(const Value& value) { return value.asJson().dump(); }
+inline std::string dumpJson(const JsonValue& value) { return value.dump(); }
+
 // Parses `text` and decodes it, failing the test with the codec error message.
 template <class A>
 A decode(const Codec<A>& codec, const std::string& text,
@@ -29,11 +34,11 @@ A decode(const Codec<A>& codec, const std::string& text,
 template <class A>
 std::string encode(const Codec<A>& codec, const typename Codec<A>::value_type& value,
                    const DynamicOps& ops = JsonOps::INSTANCE) {
-  const DataResult<JsonValue> result = codec.encodeStart(ops, value);
+  const DataResult<Value> result = codec.encodeStart(ops, value);
   if (!result.result().has_value()) {
     throw std::runtime_error("encode failed: " + result.message());
   }
-  return result.result()->dump();
+  return dumpJson(*result.result());
 }
 
 // Decodes expecting a failure and returns the error message.

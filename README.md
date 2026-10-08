@@ -38,7 +38,9 @@ Codec<RiskDef> RiskDefCodec = record<RiskDef>(
 
 // decode / encode
 DataResult<RiskDef> decoded = RiskDefCodec.parse(JsonOps::INSTANCE, JsonValue::parse(text));
-DataResult<JsonValue> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, value);
+DataResult<Value> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, value);
+// `Value` is the format-neutral handle the ops layer exchanges; with JsonOps,
+// `encoded.result()->asJson()` gives the JSON node back.
 ```
 
 ---
@@ -169,6 +171,14 @@ semantics**, like Gson's `JsonElement`: a handle shares ownership of the documen
 it came from and points at one node, so copying a handle, reading a member or
 walking an array is O(1) and never duplicates the DOM. The codec layer stays
 readable while applications keep full access:
+
+Above `JsonValue` sits the ops layer's own value type, `codec::Value`: a
+format-neutral handle (shared owner + node pointer + type tag) that every
+`DynamicOps` implementation exchanges, so a second format's ops (TOML, NBT) can
+plug into the same codecs. With `JsonOps` the payload is a `JsonValue` node, so
+`value.asJson()` is the way back — and the erasure costs nothing measurable: the
+2-risk codec decode measured 15 423 ns against the 15 500 ns it had before the
+change (see §7 and [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)).
 
 ```cpp
 JsonValue value = nlohmann::ordered_json::parse(text);   // implicit conversion
@@ -504,7 +514,7 @@ Intentional deviations and additions, all documented in the headers:
 
 | Area | DFU | Port | Why |
 | --- | --- | --- | --- |
-| `DynamicOps` value type | generic `T` (JsonElement, NbtTag, …) | single `JsonValue` | one concrete DOM; `convertTo` is the identity |
+| `DynamicOps` value type | generic `T` (JsonElement, NbtTag, …) | a type-erased `Value` handle (owner + node + tag) | the ops layer is format-neutral now; `JsonValue` is the JSON DOM behind `JsonOps`, and `convertTo` becomes a real conversion once a second ops exists (see [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)) |
 | `Stream<T>` | lazy Java streams | `std::vector` | no lazy streams in the standard library |
 | `KeyCompressor.compress` | unknown key → `0` (fastutil default) | unknown key → `-1` → treated as absent | avoids silently reading index 0 |
 | `UnboundedMapCodec` duplicates | `ImmutableMap.Builder` throws | last-wins, insertion order kept | keeps decoding usable |

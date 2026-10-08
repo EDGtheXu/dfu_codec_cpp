@@ -19,6 +19,7 @@ using codec::DataResult;
 using codec::Either;
 using codec::JsonOps;
 using codec::JsonValue;
+using codec::Value;
 using codec::codecs::Bool;
 using codec::codecs::Double;
 using codec::codecs::Int;
@@ -172,13 +173,13 @@ TEST(SmokeTest, HandlesEveryEitherAlternativeAndShapeBranch) {
 TEST(SmokeTest, CompressedAndPlainOpsAgree) {
   const Payload payload = decode(payloadCodec(), kDocument());
 
-  const DataResult<JsonValue> compressed =
+  const DataResult<Value> compressed =
       payloadCodec().encodeStart(JsonOps::COMPRESSED, payload);
   ASSERT_TRUE(compressed.result().has_value()) << compressed.message();
   // Compressed records become key-indexed lists.
-  EXPECT_TRUE(compressed.result()->isArray()) << compressed.result()->dump();
+  EXPECT_TRUE(compressed.result()->asJson().isArray()) << compressed.result()->asJson().dump();
 
-  const Payload restored = decode(payloadCodec(), compressed.result()->dump(), JsonOps::COMPRESSED);
+  const Payload restored = decode(payloadCodec(), compressed.result()->asJson().dump(), JsonOps::COMPRESSED);
   EXPECT_EQ(restored, payload);
 
   // Compressed ops expect a list, not an object.

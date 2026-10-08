@@ -37,7 +37,8 @@ Codec<RiskDef> RiskDefCodec = record<RiskDef>(
 
 // decode / encode
 DataResult<RiskDef> decoded = RiskDefCodec.parse(JsonOps::INSTANCE, JsonValue::parse(text));
-DataResult<JsonValue> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, value);
+DataResult<Value> encoded = RiskDefCodec.encodeStart(JsonOps::INSTANCE, value);
+// `Value` 是 ops 层格式无关的值句柄；配 JsonOps 时用 encoded.result()->asJson() 取回 JSON 节点
 ```
 
 ---
@@ -158,6 +159,13 @@ DFU 的 `JsonOps` 基于 Gson 的 `JsonElement`。本移植改用 **nlohmann/jso
 `JsonElement` 一样具有**引用语义**：一个句柄与它来源的文档共享所有权，并指向其中
 某个节点，因此复制句柄、读取成员或遍历数组都是 O(1)，绝不会复制整棵 DOM。codec
 层保持简洁易读，同时应用侧仍可完全访问底层文档：
+
+`JsonValue` 之上是 ops 层自己的值类型 `codec::Value`：一个格式无关的句柄
+（共享所有者 + 节点指针 + 类型标签），所有 `DynamicOps` 实现都用它收发值，因此第二
+种格式（TOML、NBT）的 ops 可以直接插进同一批 codec。配 `JsonOps` 时载荷就是
+`JsonValue` 节点，用 `value.asJson()` 取回即可；这次擦除的代价测不出来：2 风险项
+codec 解码 **15 423 ns**，改动前的同机基线是 15 500 ns（见 §7 与
+[`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)）。
 
 ```cpp
 JsonValue value = nlohmann::ordered_json::parse(text);   // 隐式转换
@@ -467,7 +475,7 @@ Codec<Condition> conditionCodec() {
 
 | 方面 | DFU | 本移植 | 原因 |
 | --- | --- | --- | --- |
-| `DynamicOps` 值类型 | 泛型 `T`（JsonElement、NbtTag……） | 单一 `JsonValue` | 只有一种 DOM；`convertTo` 即恒等 |
+| `DynamicOps` 值类型 | 泛型 `T`（JsonElement、NbtTag……） | 类型擦除的 `Value` 句柄（所有者 + 节点 + 标签） | ops 层已经格式无关；`JsonValue` 是 `JsonOps` 背后的 JSON DOM，`convertTo` 在接入第二种格式后就是真正的转换（设计见 [`docs/dynamic_ops_generic.md`](docs/dynamic_ops_generic.md)） |
 | `Stream<T>` | Java 惰性流 | `std::vector` | 标准库没有惰性流 |
 | `KeyCompressor.compress` | 未知键 → `0`（fastutil 默认值） | 未知键 → `-1` → 视为不存在 | 避免静默读取索引 0 |
 | `UnboundedMapCodec` 重复键 | `ImmutableMap.Builder` 抛异常 | 后者覆盖，保持插入顺序 | 保证解码可用 |

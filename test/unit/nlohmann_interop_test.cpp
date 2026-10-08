@@ -10,6 +10,7 @@ namespace {
 using codec::DataResult;
 using codec::JsonOps;
 using codec::JsonValue;
+using codec::Value;
 
 TEST(NlohmannInteropTest, JsonValueWrapsANlohmannDocument) {
   const nlohmann::ordered_json document =
@@ -52,10 +53,10 @@ TEST(NlohmannInteropTest, CodecsConsumeNlohmannDocumentsAndProduceThemBack) {
   EXPECT_EQ(*decodedRisk.condition->orClauses.at(0).param, "a");
 
   // Encode it back and read the result through nlohmann/json.
-  const DataResult<JsonValue> encoded =
+  const DataResult<Value> encoded =
       risk::riskDocumentCodec().encodeStart(JsonOps::INSTANCE, *decoded.result());
   ASSERT_TRUE(encoded.result().has_value()) << encoded.message();
-  const nlohmann::ordered_json& raw = encoded.result()->raw();
+  const nlohmann::ordered_json& raw = encoded.result()->asJson().raw();
   ASSERT_TRUE(raw.is_object());
   ASSERT_TRUE(raw.contains("risks"));
   EXPECT_EQ(raw.at("risks").at(0).at("id").get<std::string>(), "R-1");
