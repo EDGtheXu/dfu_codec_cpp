@@ -8,6 +8,7 @@
 
 namespace {
 
+using codec::Codec;
 using codec::DataResult;
 using codec::JsonOps;
 using codec::JsonValue;
@@ -155,21 +156,59 @@ TEST(RiskDefTest, FailedElementsContributeTheirPartialValues) {
   EXPECT_TRUE(partial.risks[1].evidence.empty());
 }
 
-TEST(RiskDefTest, MalformedConditionalFieldsFallBackToTheirDefaults) {
-  // Every member of Condition is optional, and DFU's OptionalFieldCodec turns a
-  // failing (or defaulted) field into an empty/default value instead of an
-  // error -- so the whole condition still decodes, just with the bad part
-  // dropped.  This documents that quirk rather than asserting an error.
-  const RiskDef risk = codec::testing::decode(
-      risk::riskDefCodec(),
-      R"({"id":"x","vid":"v","risk_type":"t","severity":"s","name":{"cn":"c","en":"e"},)"
-      R"("description":{"cn":"c","en":"e"},"solution":{"cn":"c","en":"e"},"evidence":[],)"
-      R"("condition":{"param":"a","list_match":1}})");
-  EXPECT_EQ(risk.id, "x");
-  ASSERT_TRUE(risk.condition.has_value());
-  EXPECT_EQ(*risk.condition->param, "a");
-  // "list_match":1 failed to decode as a string and was dropped.
-  EXPECT_FALSE(risk.condition->listMatch.has_value());
+TEST(RiskDefTest, MalformedConditionalFieldsAreReportedWithTheirLocation) {
+  // The model uses the strict optional variants on purpose: a malformed condition
+  // must not be silently dropped, because that would turn "this rule is broken"
+  // into "this rule does not apply".  message() stays DFU's text, describe() adds
+  // where it happened.
+  const DataResult<RiskDef> result = risk::riskDefCodec().parse(
+      JsonOps::INSTANCE,
+      codec::testing::json(R"({"id":"x","vid":"v","risk_type":"t","severity":"s",)"
+                           R"("name":{"cn":"c","en":"e"},"description":{"cn":"c","en":"e"},)"
+                           R"("solution":{"cn":"c","en":"e"},"evidence":[],)"
+                           R"("condition":{"param":"a","list_match":1}})"));
+  ASSERT_TRUE(result.isError());
+  EXPECT_EQ(result.message(), "Not a string: 1");
+  EXPECT_EQ(result.location(), "condition.list_match");
+  EXPECT_EQ(result.describe(), "condition.list_match: Not a string: 1");
+}
+
+TEST(RiskDefTest, ErrorLocationPointsIntoTheDocument) {
+  // Four risks, the last one with a numeric "op" where the model expects a string.
+  std::string text = R"({"risks":[)";
+  for (int i = 0; i < 3; ++i) {
+    text += R"({"id":"ok","vid":"v","risk_type":"t","severity":"s","name":{"cn":"c","en":"e"},)"
+            R"("description":{"cn":"c","en":"e"},"solution":{"cn":"c","en":"e"},)"
+            R"("condition":{"or":[{"param":"p","op":"is_true"}]},"evidence":[]},)";
+  }
+  text += R"({"id":"bad","vid":"v","risk_type":"t","severity":"s","name":{"cn":"c","en":"e"},)"
+          R"("description":{"cn":"c","en":"e"},"solution":{"cn":"c","en":"e"},)"
+          R"("condition":{"or":[{"param":"p","op":1}]},"evidence":[]})";
+  text += "]}";
+
+  const DataResult<RiskDocument> result =
+      risk::riskDocumentCodec().parse(JsonOps::INSTANCE, codec::testing::json(text));
+  ASSERT_TRUE(result.isError());
+  // DFU's message ...
+  EXPECT_EQ(result.message(), "Not a string: 1");
+  // ... plus where it happened, in the requested shape.
+  EXPECT_EQ(result.location(), "risks[3].condition.or[0].op");
+  EXPECT_EQ(result.describe(), "risks[3].condition.or[0].op: Not a string: 1");
+}
+
+TEST(RiskDefTest, LenientOptionalFieldsStillSwallowTheError) {
+  // The other half of the same contract: codec::optionalFieldOf keeps DFU's
+  // lenient behaviour, so a malformed value becomes "absent" instead of an error.
+  // Useful for data you do not control; not what a validator wants.
+  struct Lenient {
+    std::optional<std::string> op;
+  };
+  const Codec<Lenient> lenient = codec::recordCodec<Lenient>(
+      codec::optionalFieldOf("op", &Lenient::op, codec::codecs::String));
+  const DataResult<Lenient> result =
+      lenient.parse(JsonOps::INSTANCE, codec::testing::json(R"({"op":1})"));
+  ASSERT_TRUE(result.isSuccess());
+  EXPECT_FALSE(result.result()->op.has_value());
 }
 
 TEST(RiskDefTest, NestedTypeErrorsPointAtTheFailingField) {

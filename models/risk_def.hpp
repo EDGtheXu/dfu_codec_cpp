@@ -97,19 +97,25 @@ inline const Codec<LocalizedText>& localizedTextCodec() {
 
 // The recursion is expressed with codec::recursive, which resolves its supplier
 // on first use and therefore also breaks the static initialisation cycle.
+//
+// The condition subtree uses the *strict* optional variants: a malformed rule must
+// not be silently dropped -- ignoring a broken condition would turn "this security
+// rule is invalid" into "this rule does not apply", which is exactly the failure
+// mode a risk validator exists to prevent.  The lenient DFU behaviour is still
+// available via codec::optionalFieldOf when loading data you do not control.
 inline const Codec<Condition>& conditionCodec() {
   static const Codec<Condition> codec = codec::recursive<Condition>([] {
     return codec::record<Condition>(
-        codec::optionalFieldOf("or", &Condition::orClauses, codec::listOf(conditionCodec()),
-                               std::vector<Condition>{}),
-        codec::optionalFieldOf("and", &Condition::andClauses, codec::listOf(conditionCodec()),
-                               std::vector<Condition>{}),
-        codec::optionalFieldOf("not", &Condition::notClauses, codec::listOf(conditionCodec()),
-                               std::vector<Condition>{}),
-        codec::optionalFieldOf("param", &Condition::param, codec::codecs::String),
-        codec::optionalFieldOf("op", &Condition::op, codec::codecs::String),
-        codec::optionalFieldOf("value", &Condition::value, codec::codecs::Passthrough),
-        codec::optionalFieldOf("list_match", &Condition::listMatch, codec::codecs::String));
+        codec::optionalFieldOfStrict("or", &Condition::orClauses, codec::listOf(conditionCodec()),
+                                     std::vector<Condition>{}),
+        codec::optionalFieldOfStrict("and", &Condition::andClauses, codec::listOf(conditionCodec()),
+                                     std::vector<Condition>{}),
+        codec::optionalFieldOfStrict("not", &Condition::notClauses, codec::listOf(conditionCodec()),
+                                     std::vector<Condition>{}),
+        codec::optionalFieldOfStrict("param", &Condition::param, codec::codecs::String),
+        codec::optionalFieldOfStrict("op", &Condition::op, codec::codecs::String),
+        codec::optionalFieldOfStrict("value", &Condition::value, codec::codecs::Passthrough),
+        codec::optionalFieldOfStrict("list_match", &Condition::listMatch, codec::codecs::String));
   });
   return codec;
 }
@@ -125,7 +131,7 @@ inline const Codec<RiskDef>& riskDefCodec() {
       codec::fieldOf("name", &RiskDef::name, localizedTextCodec()),
       codec::fieldOf("description", &RiskDef::description, localizedTextCodec()),
       codec::fieldOf("solution", &RiskDef::solution, localizedTextCodec()),
-      codec::optionalFieldOf("condition", &RiskDef::condition, conditionCodec()),
+      codec::optionalFieldOfStrict("condition", &RiskDef::condition, conditionCodec()),
       codec::fieldOf("evidence", &RiskDef::evidence, codec::listOf(codec::codecs::String)));
   return codec;
 }

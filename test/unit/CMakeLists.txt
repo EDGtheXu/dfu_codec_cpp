@@ -13,6 +13,7 @@ add_executable(codec_unit_tests
   record_codec_test.cpp
   dispatch_test.cpp
   string_and_enum_test.cpp         # JSON scalar <-> enum / number / string cookbook
+  error_path_test.cpp              # error locations: risks[3].condition.or[0].op
   header_self_contained_test.cpp   # includes codec.hpp before anything else
   odr_test.cpp
   odr_probe.cpp          # second TU: guards the header-only property

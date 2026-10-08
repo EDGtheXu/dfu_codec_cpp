@@ -93,14 +93,18 @@ TEST(CodecCombinatorTest, PromotePartialTurnsFailedElementsIntoASuccess) {
   const Codec<std::vector<int32_t>> codec = codec::listOf(Int);
   const DataResult<std::vector<int32_t>> strict = codec.parse(JsonOps::INSTANCE, json("[1,\"x\"]"));
   ASSERT_TRUE(strict.isError());
+  // message() is DFU's text; location()/describe() add where it happened.
   EXPECT_EQ(strict.message(), "Not a number: \"x\"");
+  EXPECT_EQ(strict.location(), "[1]");
+  EXPECT_EQ(strict.describe(), "[1]: Not a number: \"x\"");
 
   std::string reported;
   const DataResult<std::vector<int32_t>> promoted =
       codec.promotePartial([&](const std::string& message) { reported = message; })
           .parse(JsonOps::INSTANCE, json("[1,\"x\"]"));
   ASSERT_TRUE(promoted.isSuccess());
-  EXPECT_EQ(reported, "Not a number: \"x\"");
+  // Diagnostics callbacks get the located form.
+  EXPECT_EQ(reported, "[1]: Not a number: \"x\"");
   EXPECT_EQ(promoted.result()->size(), 1u);
   EXPECT_EQ(promoted.result()->at(0), 1);
 }

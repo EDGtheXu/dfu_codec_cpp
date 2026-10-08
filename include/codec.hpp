@@ -671,31 +671,137 @@ auto combineAll(const Lifecycle& base, F function, const DataResult<Ts>&... resu
 
 }  // namespace detail
 
+// ---------------------------------------------------------------------------
+// Error paths -- addition without a DFU counterpart
+//
+// A DFU error message carries no location: a failure inside
+// `{"risks":[...,{"condition":{"or":[{"op":1}]}}]}` only says
+// `Not a string: 1`.  This port records the location alongside the message, so
+//
+//     result.message()    -> "Not a string: 1"                        (DFU text)
+//     result.location()   -> "risks[3].condition.or[0].op"
+//     result.describe()   -> "risks[3].condition.or[0].op: Not a string: 1"
+//
+// `message()` therefore stays byte-identical to DFU while `describe()` is the
+// diagnostic form to show users.  Segments are appended by the containers as an
+// error travels outwards (fieldOf adds the key, ListCodec adds [i], the record
+// builder adds the field name when encoding), so `path` is stored leaf-first and
+// rendered root-first.
+struct PathSegment {
+  bool isIndex = false;
+  int32_t position = 0;
+  std::string key;
+
+  static PathSegment field(std::string name) {
+    PathSegment segment;
+    segment.key = std::move(name);
+    return segment;
+  }
+  static PathSegment element(int32_t position) {
+    PathSegment segment;
+    segment.isIndex = true;
+    segment.position = position;
+    return segment;
+  }
+
+  std::string render() const {
+    return isIndex ? "[" + std::to_string(position) + "]" : key;
+  }
+  bool operator==(const PathSegment& other) const {
+    return isIndex == other.isIndex && position == other.position && key == other.key;
+  }
+  bool operator!=(const PathSegment& other) const { return !(*this == other); }
+};
+
+// One failure: where it was found and DFU's message for it.  A result that failed
+// in several places holds several parts, which is what `message()` joins with
+// "; " exactly like DFU does.
+struct ErrorPart {
+  std::vector<PathSegment> path;  // leaf first
+  std::string message;
+};
+
+inline std::string renderPath(const std::vector<PathSegment>& path) {
+  std::string out;
+  for (auto it = path.rbegin(); it != path.rend(); ++it) {
+    if (it->isIndex) {
+      out += it->render();
+    } else {
+      if (!out.empty()) {
+        out += ".";
+      }
+      out += it->key;
+    }
+  }
+  return out;
+}
+
 // Type-erased view over a DataResult<?>, used by RecordBuilder/ListBuilder
 // `withErrorsFrom` (which in DFU take a DataResult<?>).
 class DataResultBase {
  public:
   virtual ~DataResultBase() = default;
 
-  bool isSuccess() const { return !error_.has_value(); }
-  bool isError() const { return error_.has_value(); }
+  bool isSuccess() const { return errors_.empty(); }
+  bool isError() const { return !errors_.empty(); }
   // True when a value is available: either a success value or the partial value
   // of a failure.
   bool hasValue() const { return valuePresent(); }
 
-  const std::string& message() const {
-    if (!error_) {
+  // DFU's message: the local messages joined with "; ", without any location.
+  std::string message() const {
+    if (errors_.empty()) {
       throw std::logic_error("DataResult::message() called on a successful result");
     }
-    return *error_;
+    std::string out;
+    for (const ErrorPart& part : errors_) {
+      if (!out.empty()) {
+        out += "; ";
+      }
+      out += part.message;
+    }
+    return out;
   }
-  const std::optional<std::string>& errorMessage() const { return error_; }
+
+  // The JSON path of the failure, e.g. `risks[3].condition.or[0].op`.  Empty when
+  // the failure has no location or when the parts failed in different places.
+  std::string location() const {
+    if (errors_.empty() || errors_.front().path.empty()) {
+      return {};
+    }
+    for (const ErrorPart& part : errors_) {
+      if (part.path != errors_.front().path) {
+        return {};
+      }
+    }
+    return renderPath(errors_.front().path);
+  }
+
+  // `location: message` per part, joined with "; " -- the form to report.
+  std::string describe() const {
+    std::string out;
+    for (const ErrorPart& part : errors_) {
+      if (!out.empty()) {
+        out += "; ";
+      }
+      const std::string path = renderPath(part.path);
+      if (!path.empty()) {
+        out += path;
+        out += ": ";
+      }
+      out += part.message;
+    }
+    return out;
+  }
+
+  const std::vector<ErrorPart>& errors() const { return errors_; }
   const Lifecycle& lifecycle() const { return lifecycle_; }
 
  protected:
   virtual bool valuePresent() const = 0;
 
-  std::optional<std::string> error_;
+  // Prepends nothing: containers append their segment with DataResult::addPath.
+  std::vector<ErrorPart> errors_;
   Lifecycle lifecycle_;
 };
 
@@ -722,7 +828,7 @@ class DataResult : public DataResultBase {
                           Lifecycle lifecycle = Lifecycle::experimental()) {
     DataResult result;
     result.value_ = std::move(partial);
-    result.error_ = std::move(message);
+    result.errors_.push_back(ErrorPart{{}, std::move(message)});
     result.lifecycle_ = lifecycle;
     return result;
   }
@@ -730,7 +836,7 @@ class DataResult : public DataResultBase {
   static DataResult errorNoPartial(std::string message,
                                    Lifecycle lifecycle = Lifecycle::experimental()) {
     DataResult result;
-    result.error_ = std::move(message);
+    result.errors_.push_back(ErrorPart{{}, std::move(message)});
     result.lifecycle_ = lifecycle;
     return result;
   }
@@ -739,15 +845,41 @@ class DataResult : public DataResultBase {
                                  Lifecycle lifecycle = Lifecycle::experimental()) {
     DataResult result;
     result.value_ = std::move(partial);
-    result.error_ = std::move(message);
+    result.errors_.push_back(ErrorPart{{}, std::move(message)});
     result.lifecycle_ = lifecycle;
     return result;
+  }
+
+  // Failure carrying already-built parts (used by the record codec builder, whose
+  // fields each report their own location).
+  static DataResult errorParts(std::vector<ErrorPart> errors, std::optional<R> partial,
+                               Lifecycle lifecycle) {
+    DataResult result;
+    result.value_ = std::move(partial);
+    result.errors_ = std::move(errors);
+    result.lifecycle_ = lifecycle;
+    return result;
+  }
+
+  // Attaches a location segment to every part.  Containers call this as an error
+  // travels outwards, so the innermost failure ends up with the full path.
+  DataResult addPath(PathSegment segment) const& {
+    DataResult out = *this;
+    for (ErrorPart& part : out.errors_) {
+      part.path.push_back(segment);
+    }
+    return out;
+  }
+  DataResult addPath(PathSegment segment) && {
+    for (ErrorPart& part : errors_) {
+      part.path.push_back(segment);
+    }
+    return std::move(*this);
   }
 
   // --- accessors ----------------------------------------------------------
   // Java's result(): the value of a successful result, empty otherwise.
   const std::optional<R>& result() const { return isError() ? kNoValue : value_; }
-  const std::optional<std::string>& error() const { return error_; }
   // The stored value whether the result succeeded or failed with a partial.
   const std::optional<R>& valueOrPartial() const { return value_; }
   bool hasPartial() const { return isError() && value_.has_value(); }
@@ -761,18 +893,19 @@ class DataResult : public DataResultBase {
 
   R getOrThrow(bool allowPartial, const ErrorHandler& onError) const {
     if (isError()) {
-      onError(message());
+      const std::string text = describe();
+      onError(text);
       if (allowPartial && value_) {
         return *value_;
       }
-      throw std::runtime_error(message());
+      throw std::runtime_error(text);
     }
     return *value_;
   }
 
   std::optional<R> resultOrPartial(const ErrorHandler& onError) const {
     if (isError()) {
-      onError(message());
+      onError(describe());
     }
     return value_;
   }
@@ -786,7 +919,7 @@ class DataResult : public DataResultBase {
     using S = MapValue<F>;
     DataResult<S> out;
     out.lifecycle_ = lifecycle_;
-    out.error_ = error_;
+    out.errors_ = errors_;
     if (value_) {
       out.value_ = std::invoke(function, *value_);
     }
@@ -806,13 +939,19 @@ class DataResult : public DataResultBase {
     }
     if (!value_) {
       // Failure without a partial: there is no value to feed the function with.
-      return DataResult<S>::errorNoPartial(*error_, lifecycle_);
+      DataResult<S> out;
+      out.errors_ = errors_;
+      out.lifecycle_ = lifecycle_;
+      return out;
     }
     DataResult<S> second = std::invoke(function, *value_);
     DataResult<S> out;
     out.lifecycle_ = lifecycle_.add(second.lifecycle_);
     out.value_ = second.value_;
-    out.error_ = second.isSuccess() ? *error_ : (*error_ + "; " + second.message());
+    out.errors_ = errors_;
+    if (second.isError()) {
+      out.errors_.insert(out.errors_.end(), second.errors_.begin(), second.errors_.end());
+    }
     return out;
   }
 
@@ -857,8 +996,12 @@ class DataResult : public DataResultBase {
 
   DataResult mapError(const StringUnaryOperator& function) const {
     DataResult out = *this;
-    if (out.error_) {
-      out.error_ = function(*out.error_);
+    if (out.isError()) {
+      // DFU applies the operator to the whole message; the location survives when
+      // every part shared it, otherwise it is dropped (it would be misleading).
+      const std::vector<PathSegment> shared = sharedPath();
+      out.errors_.clear();
+      out.errors_.push_back(ErrorPart{shared, function(message())});
     }
     return out;
   }
@@ -880,7 +1023,7 @@ class DataResult : public DataResultBase {
     if (!isError()) {
       return *this;
     }
-    onError(message());
+    onError(describe());
     if (value_) {
       return DataResult::success(*value_, lifecycle_);
     }
@@ -892,6 +1035,19 @@ class DataResult : public DataResultBase {
 
  private:
   static const std::optional<R> kNoValue;
+
+  // The path shared by every part, or empty when they differ.
+  std::vector<PathSegment> sharedPath() const {
+    if (errors_.empty() || errors_.front().path.empty()) {
+      return {};
+    }
+    for (const ErrorPart& part : errors_) {
+      if (part.path != errors_.front().path) {
+        return {};
+      }
+    }
+    return errors_.front().path;
+  }
 
   bool valuePresent() const override { return value_.has_value(); }
 
@@ -906,9 +1062,10 @@ namespace detail {
 // ---------------------------------------------------------------------------
 // combineAll -- DFU's Applicative.super.ap2 chain generalised to N operands:
 //   * all operands succeed -> success(f(values...))
-//   * otherwise            -> failure whose message is the failed messages
-//                             joined by "; " in operand order, carrying a
-//                             partial value when every operand has one
+//   * otherwise            -> failure collecting the failed parts in operand
+//                             order (message() joins their texts with "; ",
+//                             describe() prefixes each with its location),
+//                             carrying a partial value when every operand has one
 //   * lifecycle            -> base.add(op1.lifecycle).add(op2.lifecycle)...
 // ---------------------------------------------------------------------------
 template <class F, class... Ts>
@@ -919,17 +1076,14 @@ auto combineAll(const Lifecycle& base, F function, const DataResult<Ts>&... resu
   Lifecycle lifecycle = base;
   bool allSuccess = true;
   bool allValues = true;
-  std::string message;
+  std::vector<ErrorPart> errors;
 
   const auto step = [&](const DataResultBase& result) {
     lifecycle = lifecycle.add(result.lifecycle());
     allSuccess = allSuccess && result.isSuccess();
     allValues = allValues && result.hasValue();
     if (result.isError()) {
-      if (!message.empty()) {
-        message += "; ";
-      }
-      message += result.message();
+      errors.insert(errors.end(), result.errors().begin(), result.errors().end());
     }
   };
   (void)std::initializer_list<int>{(step(results), 0)...};
@@ -941,7 +1095,7 @@ auto combineAll(const Lifecycle& base, F function, const DataResult<Ts>&... resu
   if (allValues) {
     partial = std::invoke(function, *results.valueOrPartial()...);
   }
-  return DataResult<R>::errorPartial(std::move(message), std::move(partial), lifecycle);
+  return DataResult<R>::errorParts(std::move(errors), std::move(partial), lifecycle);
 }
 
 // Java's AbstractBuilder.withErrorsFrom: `builder.flatMap(b -> result.map(r -> b))`.
@@ -950,13 +1104,17 @@ DataResult<S> propagateErrors(const DataResult<S>& builder, const DataResultBase
   if (result.isSuccess()) {
     return builder;
   }
+  std::vector<ErrorPart> errors;
   if (builder.isSuccess()) {
-    return DataResult<S>::error(result.message(), builder.value(),
-                                builder.lifecycle().add(result.lifecycle()));
+    errors = result.errors();
+    return DataResult<S>::errorParts(std::move(errors), builder.value(),
+                                     builder.lifecycle().add(result.lifecycle()));
   }
   if (builder.hasValue()) {
-    return DataResult<S>::error(builder.message() + "; " + result.message(), builder.value(),
-                                builder.lifecycle().add(result.lifecycle()));
+    errors = builder.errors();
+    errors.insert(errors.end(), result.errors().begin(), result.errors().end());
+    return DataResult<S>::errorParts(std::move(errors), builder.value(),
+                                     builder.lifecycle().add(result.lifecycle()));
   }
   return builder;
 }
@@ -1308,7 +1466,8 @@ class UniversalRecordBuilder
           state->emplace_back(key, element);
           return state;
         },
-        value);
+        // Encode failures carry the member they came from: `severity: Unmapped E value`.
+        key.isString() ? value.addPath(PathSegment::field(key.asString())) : value);
     return *this;
   }
 
@@ -1354,7 +1513,8 @@ class StringRecordBuilder
           putJsonMember(*state, key, element);
           return state;
         },
-        value);
+        // Encode failures carry the member they came from.
+        value.addPath(PathSegment::field(key)));
     return *this;
   }
 
@@ -1398,7 +1558,9 @@ class CompressedRecordBuilder
           assign(key, element, state);
           return state;
         },
-        value);
+        // Compressed records keep the key name for diagnostics (the slot index
+        // would be meaningless to a reader).
+        key.isString() ? value.addPath(PathSegment::field(key.asString())) : value);
     return *this;
   }
 
@@ -2532,6 +2694,12 @@ class Codec {
 
   MapCodec<A> optionalFieldOf(const std::string& name, A defaultValue) const;
 
+  // Error-propagating counterparts (addition): a present-but-invalid value fails
+  // with its location instead of being dropped.
+  MapCodec<std::optional<A>> optionalFieldOfStrict(const std::string& name) const;
+
+  MapCodec<A> optionalFieldOfStrict(const std::string& name, A defaultValue) const;
+
   Codec<std::vector<A>> listOf() const;
 
   // --- mapping ------------------------------------------------------------
@@ -2677,9 +2845,12 @@ inline MapDecoder<A> Decoder<A>::fieldOf(const std::string& name) const {
       [self, name](const DynamicOps& ops, const MapLike& input) -> DataResult<A> {
         const std::optional<JsonValue> value = input.get(name);
         if (!value.has_value()) {
-          return DataResult<A>::error("No key " + name + " in " + input.toString());
+          // The location is attached even here so that a missing key reads as
+          // `risks[3].severity: No key severity in MapLike[...]`.
+          return DataResult<A>::error("No key " + name + " in " + input.toString())
+              .addPath(PathSegment::field(name));
         }
-        return self.parse(ops, *value);
+        return self.parse(ops, *value).addPath(PathSegment::field(name));
       },
       [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; });
 }
@@ -2699,6 +2870,10 @@ inline Codec<A> MapCodec<A>::codec() const {
 }
 
 // optionalField(name, codec) -- MapCodec<Optional<A>> (OptionalFieldCodec).
+//
+// DFU behaviour, kept: a present-but-invalid value is treated as absent, so the
+// error (and its location) is dropped.  See optionalFieldStrict below when that is
+// not what you want.
 template <class A>
 MapCodec<std::optional<A>> optionalField(const std::string& name, Codec<A> elementCodec) {
   return MapCodec<std::optional<A>>::of(
@@ -2728,6 +2903,44 @@ MapCodec<std::optional<A>> optionalField(const std::string& name, Codec<A> eleme
       "OptionalFieldCodec[" + name + ": " + elementCodec.name() + "]");
 }
 
+// optionalFieldStrict(name, codec) -- addition without a DFU counterpart.
+//
+// Same shape as optionalField, except that a present-but-invalid value is a
+// *failure* carrying the field's location instead of being silently dropped:
+//
+//     {"severity": 1}   ->  ok            (optionalField)
+//                       ->  severity: Not a string: 1   (optionalFieldStrict)
+//
+// Use it where a malformed value must not be ignored -- validators, security
+// rules, anything that would otherwise decode "the field was dropped" as "the
+// field was fine".
+template <class A>
+MapCodec<std::optional<A>> optionalFieldStrict(const std::string& name, Codec<A> elementCodec) {
+  return MapCodec<std::optional<A>>::of(
+      MapEncoder<std::optional<A>>(
+          [name, elementCodec](const std::optional<A>& input, const DynamicOps& ops,
+                              RecordBuilder& prefix) -> RecordBuilder& {
+            if (!input.has_value()) {
+              return prefix;
+            }
+            return prefix.add(name, elementCodec.encodeStart(ops, *input));
+          },
+          [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; }),
+      MapDecoder<std::optional<A>>(
+          [name, elementCodec](const DynamicOps& ops,
+                              const MapLike& input) -> DataResult<std::optional<A>> {
+            const std::optional<JsonValue> value = input.get(name);
+            if (!value.has_value()) {
+              return DataResult<std::optional<A>>::success(std::optional<A>{});
+            }
+            return elementCodec.parse(ops, *value)
+                .map([](const A& parsed) { return std::optional<A>(parsed); })
+                .addPath(PathSegment::field(name));
+          },
+          [name](const DynamicOps& ops) { return std::vector<JsonValue>{ops.createString(name)}; }),
+      "StrictOptionalFieldCodec[" + name + ": " + elementCodec.name() + "]");
+}
+
 template <class A>
 inline MapCodec<std::optional<A>> Codec<A>::optionalFieldOf(const std::string& name) const {
   return optionalField(name, *this);
@@ -2738,6 +2951,23 @@ inline MapCodec<A> Codec<A>::optionalFieldOf(const std::string& name, A defaultV
   // DFU: optionalField(name, this).xmap(o -> o.orElse(defaultValue),
   //                                     a -> a.equals(defaultValue) ? empty() : of(a))
   return optionalField(name, *this).template xmap<A>(
+      std::function<A(const std::optional<A>&)>([defaultValue](const std::optional<A>& value) {
+        return value.has_value() ? *value : defaultValue;
+      }),
+      std::function<std::optional<A>(const A&)>([defaultValue](const A& value) {
+        return value == defaultValue ? std::optional<A>{} : std::optional<A>(value);
+      }));
+}
+
+// Codec::optionalFieldOfStrict -- the error-propagating counterpart (addition).
+template <class A>
+inline MapCodec<std::optional<A>> Codec<A>::optionalFieldOfStrict(const std::string& name) const {
+  return optionalFieldStrict(name, *this);
+}
+
+template <class A>
+inline MapCodec<A> Codec<A>::optionalFieldOfStrict(const std::string& name, A defaultValue) const {
+  return optionalFieldStrict(name, *this).template xmap<A>(
       std::function<A(const std::optional<A>&)>([defaultValue](const std::optional<A>& value) {
         return value.has_value() ? *value : defaultValue;
       }),
@@ -2970,8 +3200,11 @@ Codec<std::vector<A>> listOf(const Codec<A>& elementCodec) {
                                                  const DynamicOps& ops,
                                                  const JsonValue& prefix) {
     const std::shared_ptr<ListBuilder> builder = ops.listBuilder();
+    int32_t index = 0;
     for (const A& element : input) {
-      builder->add(elementCodec.encodeStart(ops, element));
+      // Encode failures keep the element position too.
+      builder->add(elementCodec.encodeStart(ops, element).addPath(PathSegment::element(index)));
+      ++index;
     }
     return builder->build(prefix);
   });
@@ -2987,8 +3220,11 @@ Codec<std::vector<A>> listOf(const Codec<A>& elementCodec) {
           std::vector<A> elements;
           std::vector<JsonValue> failed;
           DataResult<Unit> result = DataResult<Unit>::success(Unit{}, Lifecycle::stable());
-          for (const JsonValue& value : values) {
-            const DataResult<std::pair<A, JsonValue>> element = elementCodec.decode(ops, value);
+          for (size_t i = 0; i < values.size(); ++i) {
+            const JsonValue& value = values[i];
+            // A failing element is located by its index: `or[0]: ...`.
+            const DataResult<std::pair<A, JsonValue>> element =
+                elementCodec.decode(ops, value).addPath(PathSegment::element(static_cast<int32_t>(i)));
             if (element.isError()) {
               failed.push_back(value);
             }
@@ -3096,8 +3332,12 @@ Codec<std::vector<std::pair<K, V>>> unboundedMap(const Codec<K>& keyCodec, const
           std::vector<std::pair<JsonValue, JsonValue>> failed;
           DataResult<Unit> result = DataResult<Unit>::success(Unit{}, Lifecycle::stable());
           for (const auto& entry : map->entries()) {
-            const DataResult<K> key = keyCodec.parse(ops, entry.first);
-            const DataResult<V> value = elementCodec.parse(ops, entry.second);
+            // Locate a bad entry by its key (or its position for non-string keys).
+            const PathSegment segment =
+                entry.first.isString() ? PathSegment::field(entry.first.asString())
+                                       : PathSegment::element(static_cast<int32_t>(failed.size()));
+            const DataResult<K> key = keyCodec.parse(ops, entry.first).addPath(segment);
+            const DataResult<V> value = elementCodec.parse(ops, entry.second).addPath(segment);
             const DataResult<Entry> decoded = key.apply2stable(
                 [](const K& k, const V& v) { return Entry(k, v); }, value);
             if (decoded.isError()) {
@@ -3288,9 +3528,11 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
                       const std::optional<JsonValue> value = input.get(ops.createString("value"));
                       if (!value.has_value()) {
                         return DataResult<V>::error("Input does not have a \"value\" entry: " +
-                                                    input.toString());
+                                                    input.toString())
+                            .addPath(PathSegment::field("value"));
                       }
-                      return codec.parse(ops, *value);
+                      // The payload of a compressed dispatch lives under "value".
+                      return codec.parse(ops, *value).addPath(PathSegment::field("value"));
                     }
                     if (codec.mapCodec() != nullptr) {
                       return codec.mapCodec()->decode(ops, input);
@@ -3302,9 +3544,10 @@ MapCodec<V> keyDispatchMapCodec(const std::string& typeKey, const Codec<K>& keyC
                     const std::optional<JsonValue> value = input.get("value");
                     if (!value.has_value()) {
                       return DataResult<V>::error("Input does not have a \"value\" entry: " +
-                                                  input.toString());
+                                                  input.toString())
+                          .addPath(PathSegment::field("value"));
                     }
-                    return codec.parse(ops, *value);
+                    return codec.parse(ops, *value).addPath(PathSegment::field("value"));
                   });
             });
       },
@@ -3507,6 +3750,30 @@ RecordField<O, F> optionalFieldOf(const std::string& name, F O::*member, const C
       codec.optionalFieldOf(name, std::move(defaultValue)));
 }
 
+// optionalFieldOfStrict(name, member, codec) -- addition: like optionalFieldOf,
+// but a present-but-invalid value fails with its location instead of being
+// silently treated as absent.  Prefer it for validation (see optionalFieldStrict).
+template <class O, class F>
+RecordField<O, std::optional<F>> optionalFieldOfStrict(const std::string& name,
+                                                      std::optional<F> O::*member,
+                                                      const Codec<F>& codec) {
+  return RecordField<O, std::optional<F>>(
+      name, [member](const O& object) { return object.*member; },
+      [member](O& object, std::optional<F> value) { object.*member = std::move(value); },
+      optionalFieldStrict(name, codec));
+}
+
+// optionalFieldOfStrict(name, member, codec, defaultValue) -- addition: an absent
+// member decodes to `defaultValue`, but a present-but-invalid one is an error.
+template <class O, class F>
+RecordField<O, F> optionalFieldOfStrict(const std::string& name, F O::*member,
+                                       const Codec<F>& codec, F defaultValue) {
+  return RecordField<O, F>(
+      name, [member](const O& object) { return object.*member; },
+      [member](O& object, F value) { object.*member = std::move(value); },
+      codec.optionalFieldOfStrict(name, std::move(defaultValue)));
+}
+
 // MapCodec.forGetter -- DFU's `mapCodec.forGetter(getter)`.
 template <class A>
 template <class O>
@@ -3523,22 +3790,19 @@ struct ResultSummary {
   Lifecycle lifecycle;
   bool allSuccess = true;
   bool allValues = true;
-  std::string message;
+  std::vector<ErrorPart> errors;
 };
 
 template <class... Rs>
 ResultSummary summarizeResults(const Lifecycle& base,
                                const std::tuple<DataResult<Rs>...>& results) {
-  ResultSummary summary{base, true, true, ""};
+  ResultSummary summary{base, true, true, {}};
   const auto step = [&summary](const DataResultBase& result) {
     summary.lifecycle = summary.lifecycle.add(result.lifecycle());
     summary.allSuccess = summary.allSuccess && result.isSuccess();
     summary.allValues = summary.allValues && result.hasValue();
     if (result.isError()) {
-      if (!summary.message.empty()) {
-        summary.message += "; ";
-      }
-      summary.message += result.message();
+      summary.errors.insert(summary.errors.end(), result.errors().begin(), result.errors().end());
     }
   };
   std::apply([&](const DataResult<Rs>&... result) {
@@ -3655,9 +3919,9 @@ MapCodec<O> record(Fields... fields) {
           if (summary.allSuccess) {
             return DataResult<O>::success(std::move(built), summary.lifecycle);
           }
-          return DataResult<O>::error(summary.message, std::move(built), summary.lifecycle);
+          return DataResult<O>::errorParts(summary.errors, std::move(built), summary.lifecycle);
         }
-        return DataResult<O>::errorNoPartial(summary.message, summary.lifecycle);
+        return DataResult<O>::errorParts(summary.errors, std::nullopt, summary.lifecycle);
       },
       [fieldsTuple](const DynamicOps& ops) {
         return detail::fieldEncoderKeys(fieldsTuple, ops, std::make_index_sequence<kCount>{});
@@ -3708,9 +3972,9 @@ MapCodec<O> record(Ctor ctor, Fields... fields) {
           if (summary.allSuccess) {
             return DataResult<O>::success(std::move(built), summary.lifecycle);
           }
-          return DataResult<O>::error(summary.message, std::move(built), summary.lifecycle);
+          return DataResult<O>::errorParts(summary.errors, std::move(built), summary.lifecycle);
         }
-        return DataResult<O>::errorNoPartial(summary.message, summary.lifecycle);
+        return DataResult<O>::errorParts(summary.errors, std::nullopt, summary.lifecycle);
       },
       [fieldsTuple](const DynamicOps& ops) {
         return detail::fieldDecoderKeys(fieldsTuple, ops, std::make_index_sequence<kCount>{});

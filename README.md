@@ -15,7 +15,7 @@ The reference implementation was decompiled from
 the port's provenance can be reproduced.
 
 * Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~3 700 lines, CMake `INTERFACE` target, nothing to build
-* Layered tests: [`test/unit/`](test/unit) (127 cases), [`test/smoke/`](test/smoke) (21 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
+* Layered tests: [`test/unit/`](test/unit) (137 cases), [`test/smoke/`](test/smoke) (23 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -64,7 +64,7 @@ Or drive CMake directly:
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # all layers, 151 cases
+ctest --test-dir build --output-on-failure   # all layers, 163 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
 ```
@@ -248,6 +248,55 @@ is built from the same two combinators, so it composes with fields, lists,
 including the error messages (`Unknown Severity: "fatal"`, `Not a number: "80x"`)
 and how `optionalFieldOf` treats a `null` or invalid enum name.
 
+### Error locations
+
+DFU messages say *what* went wrong but never *where*: a bad value deep inside a
+document only reports `Not a string: 1`. This port records the location next to the
+message, so a failure reads like a compiler/validator diagnostic:
+
+```cpp
+const DataResult<RiskDocument> result = riskDocumentCodec().parse(JsonOps::INSTANCE, input);
+
+result.isError();     // true
+result.message();     // "Not a string: 1"                                    (DFU text)
+result.location();    // "risks[3].condition.or[0].op"
+result.describe();    // "risks[3].condition.or[0].op: Not a string: 1"        (report this)
+result.errors();      // {ErrorPart{path, message}} -- one entry per failed spot
+```
+
+* `message()` is **byte-identical to DFU** (the local messages joined with `"; "`),
+  which is why adding paths changed no existing behaviour.
+* `describe()` prefixes each failed spot with its location, e.g.
+  `a: No key a in MapLike[{}]; b: No key b in MapLike[{}]`. `location()` returns the
+  path only when every part shares one, otherwise `""`.
+* Locations are attached by the containers as the error travels outwards:
+  `fieldOf` adds the key, `ListCodec` adds `[i]`, `unboundedMap` adds the entry key,
+  `dispatch` adds `value` for non-map payloads, and the record/list builders add the
+  field or element on the *encode* side (`small: too large to encode: 200`).
+* `promotePartial`, `resultOrPartial` and `getOrThrow` hand the located form to
+  their `onError` callback — that is what those callbacks are for.
+* Prefer different wording (e.g. `expected string, got number`)? Rewrite the leaf
+  codec with `Codec::mapResult` + `DataResult::mapError` and the location survives;
+  see `ErrorPathTest.WordingCanBeRewrittenWhileKeepingTheLocation`.
+* Paths are an **addition** — DFU has none. `test/unit/error_path_test.cpp` covers
+  the format, nested lists, multi-part failures, missing keys, unbounded maps,
+  dispatch payloads and the encode side.
+
+**Strict optional fields.** Paths only help if the error is not swallowed, and DFU's
+`OptionalFieldCodec` deliberately swallows a present-but-invalid optional value. For
+validation you want the error, so the port adds error-propagating counterparts:
+
+| | `{"n": 1}` with `Codec<optional<int>>` | Use for |
+| --- | --- | --- |
+| `optionalFieldOf` (DFU) | decodes to `nullopt` | lenient loading of data you do not control |
+| `optionalFieldOfStrict` | fails: `n: Not a number: 1` | validators — a broken value must not look like an absent one |
+
+`optionalFieldOfStrict(name, codec)`, `optionalFieldOfStrict(name, codec, default)`
+and the record-field wrappers (`optionalFieldOfStrict(name, &O::member, codec[, default])`)
+mirror the lenient API one-to-one. The reference risk model uses the strict variants
+inside `condition`, because silently dropping a malformed security rule would turn
+"this rule is broken" into "this rule does not apply".
+
 ## 4. The reference use case
 
 `models/risk_def.hpp` models the risk-definition document, including its
@@ -289,7 +338,10 @@ Measured results (see `test/smoke/risk_def_test.cpp` and the example):
   `or` condition, the leaf `list_match` predicate and UTF-8 `cn`/`en` strings;
 * re-encoding is **byte-for-byte identical** to a compact re-serialisation of the
   input (the record field order mirrors the document);
-* decode → encode → decode is stable, and a hand-built document round-trips.
+* decode → encode → decode is stable, and a hand-built document round-trips;
+* a malformed rule is reported with its location, e.g.
+  `risks[3].condition.or[0].op: Not a string: 1` — the model uses the strict
+  optional variants so a broken condition is never silently dropped (see §5).
 
 ## 5. Behaviour notes (faithfulness)
 
@@ -331,14 +383,16 @@ Intentional deviations and additions, all documented in the headers:
 | `Codec.optionalFieldOf(name, Lifecycle, …)` | 4-argument overload | not ported | rarely used; `.stable()` covers it |
 | `codec::recursive<A>(supplier)` *(addition)* | — (Java expresses recursion through the datafixer graphs) | provided | resolves the supplier on first use, which also breaks the static-initialisation cycle |
 | `codecs::stringEnum<E>(table, name)` *(addition)* | — (Minecraft uses `StringRepresentable.fromEnum`, which is not in DFU) | provided | name-table enums without boilerplate; implemented with `flatXmap`, so it composes like any other codec |
+| `DataResult::location()` / `describe()` *(addition)* | no locations anywhere | every field/element/map entry attaches its path | messages stay DFU-identical; `describe()` reports `risks[3].condition.or[0].op: Not a string: 1` |
+| `optionalFieldStrict` / `optionalFieldOfStrict` *(addition)* | `OptionalFieldCodec` swallows a present-but-invalid value | error-propagating counterpart | a validator must not read a broken value as an absent one |
 
 ## 6. Test layers
 
-151 GoogleTest cases in three independent executables. `ctest` prefixes each case
+163 GoogleTest cases in three independent executables. `ctest` prefixes each case
 with its layer (`unit.*`, `smoke.*`, `perf.*`), so any layer can be selected as a
 group.
 
-**`test/unit/` → `codec_unit_tests` (127 cases)** — component level, exhaustive
+**`test/unit/` → `codec_unit_tests` (137 cases)** — component level, exhaustive
 on edge cases:
 
 | File | Focus |
@@ -352,10 +406,11 @@ on edge cases:
 | `record_codec_test.cpp` | `record<>` in all forms, `fieldOf`/`optionalFieldOf`/`forGetter`, error joining, partial objects, keys, compression |
 | `dispatch_test.cpp` | `KeyDispatchCodec` (`partialDispatch`/`dispatch`/`dispatchMap`), map-codec payload merging, compressed dispatch |
 | `string_and_enum_test.cpp` | the scalar-conversion cookbook: number↔enum, string↔enum (incl. `codecs::stringEnum`), string↔number, number-or-string via `either`, enums in records/lists/optional fields |
+| `error_path_test.cpp` | error locations: the requested `risks[3].condition.or[0].op` form, message wording rewrites, nested lists, multi-part failures, missing keys, unbounded maps, dispatch payloads, the encode side, strict vs lenient optionals |
 | `odr_test.cpp` + `odr_probe.cpp` | header-only guarantee: two TUs including the single header link together, and the inline singletons have one shared address |
 | `header_self_contained_test.cpp` | includes `codec.hpp` before every other header, proving the single header stands alone |
 
-**`test/smoke/` → `codec_smoke_tests` (21 cases)** — small and fast end-to-end
+**`test/smoke/` → `codec_smoke_tests` (23 cases)** — small and fast end-to-end
 passes that answer "does the port work at all?":
 
 | File | Focus |
