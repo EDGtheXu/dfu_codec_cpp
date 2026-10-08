@@ -345,8 +345,24 @@ Codec<Condition> conditionCodec() {
   `list_match` 谓词以及 UTF-8 的 `cn`/`en` 字符串；
 * 重新编码与输入文档的紧凑序列化结果**逐字节一致**（record 字段顺序与文档一致）；
 * decode → encode → decode 稳定，手工构造的文档同样可以正常往返；
-* 非法规则会带上位置上报，例如 `risks[3].condition.or[0].op: Not a string: 1`——模型
-  使用严格可选字段，因此坏掉的条件不会被静默丢弃（见第 5 节）。
+* 非法规则会带上准确位置和处理它的 codec 调用链，`risk_def_example.exe bad.json` 输出：
+
+  ```text
+  risks[0].condition.or[0].op: Not a string: 1
+    in String
+    in optional[op]
+    in RecordCodec[or, and, not, param, op, value, list_match]
+    in list
+    in optional[or]
+    in RecordCodec[or, and, not, param, op, value, list_match]
+    in optional[condition]
+    in RecordCodec[id, vid, risk_type, severity, name, description, solution, condition, evidence]
+    in list
+    in RecordCodec[risks]
+  ```
+
+  条件树是递归的，所以同一个 `RecordCodec` 会在两层出现。模型使用严格可选字段，
+  因此坏掉的条件不会被静默丢弃（见第 3、5 节）。
 
 ## 5. 行为说明（忠实性）
 

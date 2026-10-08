@@ -77,7 +77,16 @@ int main(int argc, char** argv) {
     const DataResult<risk::RiskDocument> decoded = codec.parse(JsonOps::INSTANCE, input);
 
     if (decoded.isError()) {
-      std::cerr << "decode failed: " << decoded.message() << "\n";
+      // report() is DFU's message plus the location and the chain of codecs that
+      // handled the value, so the diagnostic points at the JSON:
+      //
+      //   decode failed:
+      //   risks[3].condition.or[0].op: Not a string: 1
+      //     in String
+      //     in optional[op]
+      //     in RecordCodec[...]
+      //     ...
+      std::cerr << "decode failed:\n" << decoded.report() << "\n";
       if (decoded.hasPartial()) {
         std::cerr << "partial decode produced " << decoded.valueOrPartial()->risks.size()
                   << " risk(s)\n";
@@ -107,7 +116,7 @@ int main(int argc, char** argv) {
 
     const DataResult<JsonValue> encoded = codec.encodeStart(JsonOps::INSTANCE, document);
     if (encoded.isError()) {
-      std::cerr << "encode failed: " << encoded.message() << "\n";
+      std::cerr << "encode failed:\n" << encoded.report() << "\n";
       return 1;
     }
     std::cout << "\nre-encoded:\n" << encoded.result()->dump(true, 2) << "\n";

@@ -194,6 +194,22 @@ TEST(RiskDefTest, ErrorLocationPointsIntoTheDocument) {
   // ... plus where it happened, in the requested shape.
   EXPECT_EQ(result.location(), "risks[3].condition.or[0].op");
   EXPECT_EQ(result.describe(), "risks[3].condition.or[0].op: Not a string: 1");
+  // ... and the chain of codecs that handled the value.  The condition tree is
+  // recursive, so the same RecordCodec appears at both levels: the "or" element is
+  // itself a condition, whose "or" field is the list that holds the bad leaf.
+  EXPECT_EQ(result.report(),
+            "risks[3].condition.or[0].op: Not a string: 1\n"
+            "  in String\n"
+            "  in optional[op]\n"
+            "  in RecordCodec[or, and, not, param, op, value, list_match]\n"
+            "  in list\n"
+            "  in optional[or]\n"
+            "  in RecordCodec[or, and, not, param, op, value, list_match]\n"
+            "  in optional[condition]\n"
+            "  in RecordCodec[id, vid, risk_type, severity, name, description, solution, "
+            "condition, evidence]\n"
+            "  in list\n"
+            "  in RecordCodec[risks]");
 }
 
 TEST(RiskDefTest, LenientOptionalFieldsStillSwallowTheError) {

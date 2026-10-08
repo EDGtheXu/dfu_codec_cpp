@@ -368,9 +368,26 @@ Measured results (see `test/smoke/risk_def_test.cpp` and the example):
 * re-encoding is **byte-for-byte identical** to a compact re-serialisation of the
   input (the record field order mirrors the document);
 * decode → encode → decode is stable, and a hand-built document round-trips;
-* a malformed rule is reported with its location, e.g.
-  `risks[3].condition.or[0].op: Not a string: 1` — the model uses the strict
-  optional variants so a broken condition is never silently dropped (see §5).
+* a malformed rule is reported with its exact location and the chain of codecs that
+  handled it — `risk_def_example.exe bad.json` prints
+
+  ```text
+  risks[0].condition.or[0].op: Not a string: 1
+    in String
+    in optional[op]
+    in RecordCodec[or, and, not, param, op, value, list_match]
+    in list
+    in optional[or]
+    in RecordCodec[or, and, not, param, op, value, list_match]
+    in optional[condition]
+    in RecordCodec[id, vid, risk_type, severity, name, description, solution, condition, evidence]
+    in list
+    in RecordCodec[risks]
+  ```
+
+  The condition tree is recursive, so the same `RecordCodec` appears at both levels.
+  The model uses the strict optional variants so a broken condition is never silently
+  dropped (see §3 and §5).
 
 ## 5. Behaviour notes (faithfulness)
 
