@@ -11,8 +11,8 @@
 `reference/dfu-6.0.8/`。这些源码属于 Mojang，仅作阅读参考——不参与构建，也刻意
 不纳入版本管理——脚本的作用是让本次移植的来源可复现。
 
-* 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 3 700 行，CMake `INTERFACE` 目标，无需编译任何源文件
-* 分层测试：[`test/unit/`](test/unit)（137 个用例）、[`test/smoke/`](test/smoke)
+* 单头文件库：[`include/codec.hpp`](include/codec.hpp)——一个文件、约 4 100 行，CMake `INTERFACE` 目标，无需编译任何源文件
+* 分层测试：[`test/unit/`](test/unit)（142 个用例）、[`test/smoke/`](test/smoke)
   （23 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
   性能对比）——每层一个独立可执行文件
 * 参考用例（风险定义文档）：[`models/risk_def.hpp`](models/risk_def.hpp)
@@ -63,7 +63,7 @@ powershell -File scripts/build.ps1 -RunTests
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 全部测试层，163 个用例
+ctest --test-dir build --output-on-failure   # 全部测试层，168 个用例
 cmake --build build --target check           # 等价的一键目标
 build/examples/risk_def_example.exe          # 可选：示例文档演示
 ```
@@ -246,8 +246,24 @@ const DataResult<RiskDocument> result = riskDocumentCodec().parse(JsonOps::INSTA
 result.isError();     // true
 result.message();     // "Not a string: 1"                                    （DFU 原文）
 result.location();    // "risks[3].condition.or[0].op"
-result.describe();    // "risks[3].condition.or[0].op: Not a string: 1"        （建议上报这个）
-result.errors();      // {ErrorPart{path, message}}——每处失败一项
+result.describe();    // "risks[3].condition.or[0].op: Not a string: 1"        （单行上报用这个）
+result.report();      // 同上，并附上处理该值的 codec 调用链（见下）
+result.errors();      // {ErrorPart{path, frames, message}}——每处失败一项
+```
+
+`report()` 是完整诊断：首行与 `describe()` 相同，之后每个经手的 codec 一行
+`  in <codec>`，由内向外排列。
+
+```text
+risks[3].condition.or[0].op: Not a string: 1
+  in String
+  in RecordCodec[op]
+  in list
+  in RecordCodec[or]
+  in optional[condition]
+  in RecordCodec[condition]
+  in list
+  in RecordCodec[risks]
 ```
 
 * `message()` 与 DFU **逐字节一致**（把各个局部消息用 `"; "` 连接），这也是新增路径
@@ -258,13 +274,23 @@ result.errors();      // {ErrorPart{path, message}}——每处失败一项
 * 位置由容器在错误向外传播时逐层附加：`fieldOf` 加键名、`ListCodec` 加 `[i]`、
   `unboundedMap` 加条目键、`dispatch` 为非 map 载荷加 `value`；**编码侧**由 record/list
   构建器加字段名或下标（`small: too large to encode: 200`）。
+* 调用链同理，每个容器一次 `addFrame`。栈帧存在各 `ErrorPart` 上，因此多处失败会各打印
+  一段。名字用的是每个 codec **自己的**短名（`Int`、`list`、`RecordCodec[a, b]`、
+  `optional[n]`、`dispatch[type]`、`unboundedMap`、`either`、`pair`），而不是容器那个
+  组合名（`ListCodec[...]`），所以嵌套 record 不会自我重复。
+* 两项标注都**只在错误向外传播时才构造**，所以成功解码既不会分配路径段、也不会分配
+  帧字符串；§7 的基准测试显示与"无标注"版本的差异在噪声范围内。
+* `mapError` 在所有失败部分路径/栈帧一致时会保留它们——`unboundedMap` 的
+  `missed input:` 改写和 `mapResult` 的措辞改写正因此仍带位置。不一致时两者都会丢弃，
+  而不是猜一个。
 * `promotePartial`、`resultOrPartial`、`getOrThrow` 会把带位置的文本交给 `onError`
   回调——这些回调本来就是用于诊断的。
 * 想换成别的措辞（例如 `expected string, got number`）？用 `Codec::mapResult` +
   `DataResult::mapError` 包一层叶子 codec，位置会保留；见
   `ErrorPathTest.WordingCanBeRewrittenWhileKeepingTheLocation`。
-* 路径属于**新增能力**（DFU 没有）。`test/unit/error_path_test.cpp` 覆盖了格式、嵌套
-  列表、多处失败、缺失键、无界 map、dispatch 载荷与编码侧。
+* 路径与栈帧属于**新增能力**（DFU 都没有）。`test/unit/error_path_test.cpp` 覆盖了格式、
+  嵌套列表、多处失败、缺失键、无界 map、dispatch 载荷与编码侧（`FrameTest` 管调用链，
+  `ErrorPathTest` 管位置）。
 
 **严格可选字段。** 路径只有在错误不被吞掉时才有意义，而 DFU 的 `OptionalFieldCodec`
 恰恰会吞掉"存在但非法"的可选值。做校验时你需要那个错误，因此本移植提供了会传播错误的
@@ -359,15 +385,15 @@ Codec<Condition> conditionCodec() {
 | `Codec.optionalFieldOf(name, Lifecycle, …)` | 4 参数重载 | 未移植 | 极少使用；`.stable()` 已可覆盖 |
 | `codec::recursive<A>(supplier)`（**新增**） | —（Java 通过 datafixer 图表达递归） | 提供 | 首次使用时才解析 supplier，同时打破静态初始化环 |
 | `codecs::stringEnum<E>(table, name)`（**新增**） | —（MC 用 `StringRepresentable.fromEnum`，它不在 DFU 里） | 提供 | 用名字表处理枚举、免去样板代码；基于 `flatXmap` 实现，因此可像其他 codec 一样组合 |
-| `DataResult::location()` / `describe()`（**新增**） | 任何地方都没有位置信息 | 每个字段/元素/map 条目都附加路径 | 消息保持与 DFU 一致；`describe()` 上报 `risks[3].condition.or[0].op: Not a string: 1` |
+| `DataResult::location()` / `describe()` / `report()`（**新增**） | 任何地方都没有位置信息 | 每个字段/元素/map 条目都附加路径，每个 codec 附加自己的名字 | 消息保持与 DFU 一致；`describe()` 上报 `risks[3].condition.or[0].op: Not a string: 1`，`report()` 再附上 codec 调用链 |
 | `optionalFieldStrict` / `optionalFieldOfStrict`（**新增**） | `OptionalFieldCodec` 会吞掉"存在但非法"的值 | 会传播错误的对应版本 | 校验器不能把坏值当成"不存在" |
 
 ## 6. 测试分层
 
-163 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
+168 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
 前缀（`unit.*`、`smoke.*`、`perf.*`），因此任何一层都可以按组选择运行。
 
-**`test/unit/` → `codec_unit_tests`（137 个用例）**——组件级，覆盖各种边界情况：
+**`test/unit/` → `codec_unit_tests`（142 个用例）**——组件级，覆盖各种边界情况：
 
 | 文件 | 关注点 |
 | --- | --- |
@@ -380,7 +406,7 @@ Codec<Condition> conditionCodec() {
 | `record_codec_test.cpp` | 各种形式的 `record<>`、`fieldOf`/`optionalFieldOf`/`forGetter`、错误合并、部分对象、keys、压缩 |
 | `dispatch_test.cpp` | `KeyDispatchCodec`（`partialDispatch`/`dispatch`/`dispatchMap`）、map codec 载荷合并、压缩 dispatch |
 | `string_and_enum_test.cpp` | 标量转换示例集：数字↔枚举、字符串↔枚举（含 `codecs::stringEnum`）、字符串↔数字、`either` 实现"数字或字符串"、枚举用于字段/列表/可选字段 |
-| `error_path_test.cpp` | 错误定位：目标格式 `risks[3].condition.or[0].op`、改写消息措辞、嵌套列表、多字段同时失败、缺失键、无界 map、dispatch 载荷、编码侧、严格/宽松可选字段对比 |
+| `error_path_test.cpp` | 错误定位：目标格式 `risks[3].condition.or[0].op`、改写消息措辞、嵌套列表、多字段同时失败、缺失键、无界 map、dispatch 载荷、编码侧、严格/宽松可选字段对比；`FrameTest` 固定 `report()` 的 codec 调用链（record、list、optional、dispatch，以及多处失败各一段） |
 | `odr_test.cpp` + `odr_probe.cpp` | 仅头文件保证：两个都包含该单头文件的翻译单元能一起链接，且 inline 单例在两个 TU 中地址一致 |
 | `header_self_contained_test.cpp` | 在其余所有头文件之前包含 `codec.hpp`，证明单头文件可独立编译 |
 
@@ -451,6 +477,11 @@ nlohmann/json 时会写出的代码：一种是手写提取，另一种是 nlohm
 > 比例，而比例稳定在约 ±15 % 以内）。大文档对"进程此前做了多少工作"很敏感：若只运行
 > `--gtest_filter=PerfTest.LargeDocument`，codec 解码实测约 4.8 ms 而不是约 7.0 ms。
 > 下结论前请在本地重跑；这套基准的用途是相对比较，而不是绝对断言。
+>
+> **标注在成功路径上是零成本的。** 路径与栈帧（§3）只在错误向外传播时才构造，因此加入
+> 它们并没有改变上面的数字：同样取 5 次运行中位数复测，大文档从 7.03 ms 变为 6.68 ms
+> （codec 解码）、10.43 ms 变为 9.62 ms（解析 + 解码）、11.24 ms 变为 10.77 ms（编码），
+> 全部落在上面所说的波动范围内。
 
 ### 结论
 

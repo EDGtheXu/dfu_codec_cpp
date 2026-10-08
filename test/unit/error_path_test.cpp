@@ -7,6 +7,7 @@
 //     result.message()   -> "Not a string: 1"                       (DFU text)
 //     result.location()  -> "risks[3].condition.or[0].op"
 //     result.describe()  -> "risks[3].condition.or[0].op: Not a string: 1"
+//     result.report()    -> the same, plus the chain of codecs that handled it
 //
 // message() is unchanged, which is why every pre-existing assertion still holds;
 // describe() is the form to show a user.  Containers attach the segment as the
@@ -113,6 +114,16 @@ TEST(ErrorPathTest, WordingCanBeRewrittenWhileKeepingTheLocation) {
 
   ASSERT_TRUE(result.isError());
   EXPECT_EQ(result.describe(), "risks[3].condition.or[0].op: expected string, got number");
+  // Rewriting the wording keeps the location *and* the frames (see FrameTest).
+  const std::vector<std::string> expected{"String",
+                                          "RecordCodec[op]",
+                                          "list",
+                                          "RecordCodec[or]",
+                                          "optional[condition]",
+                                          "RecordCodec[condition]",
+                                          "list",
+                                          "RecordCodec[risks]"};
+  EXPECT_EQ(result.errors().front().frames, expected);
 }
 
 TEST(ErrorPathTest, PathsComposeThroughNestedLists) {
@@ -180,6 +191,10 @@ TEST(ErrorPathTest, UnboundedMapsAndDispatchLocateTheirFailures) {
   ASSERT_TRUE(badEntry.isError());
   EXPECT_EQ(badEntry.message(), "Not a number: \"x\" missed input: {\"b\":\"x\"}");
   EXPECT_EQ(badEntry.describe(), "b: Not a number: \"x\" missed input: {\"b\":\"x\"}");
+  // mapError rebuilt the message but kept the entry's location and the codec chain
+  // that produced it (both parts agreed, so both survive).
+  EXPECT_EQ(badEntry.report(),
+            "b: Not a number: \"x\" missed input: {\"b\":\"x\"}\n  in Int\n  in unboundedMap");
 
   // A dispatch payload: a MapCodecCodec payload shares the outer object, so the
   // path is just the payload field ...
@@ -200,6 +215,9 @@ TEST(ErrorPathTest, UnboundedMapsAndDispatchLocateTheirFailures) {
       decode(dispatched, R"({"type":"circle","radius":"x"})");
   ASSERT_TRUE(flatPayload.isError());
   EXPECT_EQ(flatPayload.describe(), "radius: Not a number: \"x\"");
+  EXPECT_EQ(flatPayload.report(),
+            "radius: Not a number: \"x\"\n  in Double\n  in RecordCodec[radius]\n"
+            "  in dispatch[type]");
 
   // ... while a payload that is *not* map backed is stored under "value", and the
   // location says so (xmap drops the MapCodec, exactly as in DFU).
@@ -217,6 +235,9 @@ TEST(ErrorPathTest, UnboundedMapsAndDispatchLocateTheirFailures) {
       decode(valueDispatched, R"({"type":"circle","value":{"radius":"x"}})");
   ASSERT_TRUE(nestedPayload.isError());
   EXPECT_EQ(nestedPayload.describe(), "value.radius: Not a number: \"x\"");
+  EXPECT_EQ(nestedPayload.report(),
+            "value.radius: Not a number: \"x\"\n  in Double\n  in RecordCodec[radius]\n"
+            "  in dispatch[type]");
 }
 
 TEST(ErrorPathTest, EncodeFailuresCarryTheirFieldToo) {
@@ -272,6 +293,116 @@ TEST(ErrorPathTest, SuccessHasNoLocation) {
   EXPECT_TRUE(result.errors().empty());
   EXPECT_EQ(result.location(), "");
   EXPECT_EQ(result.describe(), "");
+  EXPECT_EQ(result.report(), "");
+}
+
+// --- frames -----------------------------------------------------------------
+//
+// Every codec that handles a failure appends its own name, so report() reads like
+// the stack of codecs the value passed through, innermost first:
+//
+//     risks[3].condition.or[0].op: Not a string: 1
+//       in String
+//       in RecordCodec[op]
+//       in list
+//       ...
+//
+// The names are the codecs' own short names (primitiveCodec's "Int", the record
+// builder's "RecordCodec[fields]"), never the composed name a container carries
+// ("ListCodec[...]"), so a chain of nested records does not repeat itself.  A
+// container that receives several failures gives each part its own chain, and
+// frames are only materialised while an error travels outwards -- a successful
+// decode allocates nothing for them.
+
+TEST(FrameTest, ReportsTheCodecChainOfTheFailingValue) {
+  const DataResult<Document> result = parseDocument(documentWithBadOp());
+  ASSERT_TRUE(result.isError());
+
+  EXPECT_EQ(result.report(),
+            "risks[3].condition.or[0].op: Not a string: 1\n"
+            "  in String\n"
+            "  in RecordCodec[op]\n"
+            "  in list\n"
+            "  in RecordCodec[or]\n"
+            "  in optional[condition]\n"
+            "  in RecordCodec[condition]\n"
+            "  in list\n"
+            "  in RecordCodec[risks]");
+
+  // The same chain, programmatically: DataResultBase::errors() exposes the parts.
+  ASSERT_EQ(result.errors().size(), 1u);
+  const std::vector<std::string> expected{"String",
+                                          "RecordCodec[op]",
+                                          "list",
+                                          "RecordCodec[or]",
+                                          "optional[condition]",
+                                          "RecordCodec[condition]",
+                                          "list",
+                                          "RecordCodec[risks]"};
+  EXPECT_EQ(result.errors().front().frames, expected);
+  // describe() stays the single line form; report() is the one with frames.
+  EXPECT_EQ(result.describe(), "risks[3].condition.or[0].op: Not a string: 1");
+}
+
+TEST(FrameTest, PrimitivesAndListsNameThemselves) {
+  const Codec<std::vector<int32_t>> codec = codec::listOf(codec::codecs::Int);
+  const DataResult<std::vector<int32_t>> result = decode(codec, R"([1,"x"])");
+  ASSERT_TRUE(result.isError());
+  EXPECT_EQ(result.report(), "[1]: Not a number: \"x\"\n  in Int\n  in list");
+}
+
+TEST(FrameTest, StrictOptionalFieldsNameTheirWrapper) {
+  struct Holder {
+    std::optional<int32_t> n;
+  };
+  const Codec<Holder> codec = codec::recordCodec<Holder>(
+      codec::optionalFieldOfStrict("n", &Holder::n, codec::codecs::Int));
+
+  const DataResult<Holder> result = decode(codec, R"({"n":"x"})");
+  ASSERT_TRUE(result.isError());
+  EXPECT_EQ(result.report(),
+            "n: Not a number: \"x\"\n  in Int\n  in optional[n]\n  in RecordCodec[n]");
+}
+
+TEST(FrameTest, EveryFailedPartCarriesItsOwnFrames) {
+  struct Pair {
+    int32_t a = 0;
+    int32_t b = 0;
+  };
+  const Codec<Pair> codec = codec::recordCodec<Pair>(
+      codec::fieldOf("a", &Pair::a, codec::codecs::Int),
+      codec::fieldOf("b", &Pair::b, codec::codecs::Int));
+
+  const DataResult<Pair> result = decode(codec, "{}");
+  ASSERT_TRUE(result.isError());
+  // Two failures, one block each, no blank line between them.
+  EXPECT_EQ(result.report(),
+            "a: No key a in MapLike[{}]\n"
+            "  in RecordCodec[a, b]\n"
+            "b: No key b in MapLike[{}]\n"
+            "  in RecordCodec[a, b]");
+  ASSERT_EQ(result.errors().size(), 2u);
+  EXPECT_EQ(result.errors()[0].frames, std::vector<std::string>{"RecordCodec[a, b]"});
+  EXPECT_EQ(result.errors()[1].frames, std::vector<std::string>{"RecordCodec[a, b]"});
+}
+
+TEST(FrameTest, EncodeFailuresKeepTheirCodecChain) {
+  const Codec<int32_t> bounded = codec::codecs::Int.flatComapMap<int32_t>(
+      [](const int32_t& value) { return value; },
+      [](const int32_t& value) -> DataResult<int32_t> {
+        if (value > 100) {
+          return DataResult<int32_t>::error("too large to encode: " + std::to_string(value));
+        }
+        return DataResult<int32_t>::success(value);
+      });
+
+  const DataResult<JsonValue> encoded =
+      codec::listOf(bounded).encodeStart(JsonOps::INSTANCE, std::vector<int32_t>{1, 200});
+  ASSERT_TRUE(encoded.isError());
+  // The rejected element has no codec of its own to name (flatComapMap replaces the
+  // encoder), so the chain starts at the list.
+  EXPECT_EQ(encoded.describe(), "[1]: too large to encode: 200");
+  EXPECT_EQ(encoded.report(), "[1]: too large to encode: 200\n  in list");
 }
 
 }  // namespace

@@ -14,8 +14,8 @@ The reference implementation was decompiled from
 — not part of the build and deliberately not versioned — and the script exists so
 the port's provenance can be reproduced.
 
-* Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~3 700 lines, CMake `INTERFACE` target, nothing to build
-* Layered tests: [`test/unit/`](test/unit) (137 cases), [`test/smoke/`](test/smoke) (23 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
+* Single-header library: [`include/codec.hpp`](include/codec.hpp) — one file, ~4 100 lines, CMake `INTERFACE` target, nothing to build
+* Layered tests: [`test/unit/`](test/unit) (142 cases), [`test/smoke/`](test/smoke) (23 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -64,7 +64,7 @@ Or drive CMake directly:
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # all layers, 163 cases
+ctest --test-dir build --output-on-failure   # all layers, 168 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
 ```
@@ -261,7 +261,23 @@ result.isError();     // true
 result.message();     // "Not a string: 1"                                    (DFU text)
 result.location();    // "risks[3].condition.or[0].op"
 result.describe();    // "risks[3].condition.or[0].op: Not a string: 1"        (report this)
-result.errors();      // {ErrorPart{path, message}} -- one entry per failed spot
+result.report();      // ... plus the chain of codecs that handled the value (below)
+result.errors();      // {ErrorPart{path, frames, message}} -- one entry per failed spot
+```
+
+`report()` is the full diagnostic: the same first line as `describe()`, then one
+`  in <codec>` line per codec the value passed through, innermost first.
+
+```text
+risks[3].condition.or[0].op: Not a string: 1
+  in String
+  in RecordCodec[op]
+  in list
+  in RecordCodec[or]
+  in optional[condition]
+  in RecordCodec[condition]
+  in list
+  in RecordCodec[risks]
 ```
 
 * `message()` is **byte-identical to DFU** (the local messages joined with `"; "`),
@@ -273,14 +289,27 @@ result.errors();      // {ErrorPart{path, message}} -- one entry per failed spot
   `fieldOf` adds the key, `ListCodec` adds `[i]`, `unboundedMap` adds the entry key,
   `dispatch` adds `value` for non-map payloads, and the record/list builders add the
   field or element on the *encode* side (`small: too large to encode: 200`).
+* Frames are attached the same way, one `addFrame` per container, and live on each
+  `ErrorPart` — so a result that failed in several places prints one block per
+  failure. Names are each codec's **own** short name (`Int`, `list`,
+  `RecordCodec[a, b]`, `optional[n]`, `dispatch[type]`, `unboundedMap`, `either`,
+  `pair`), never the composed name a container carries, so a chain of nested records
+  does not repeat itself.
+* Both annotations are built *only while an error travels outwards*, so a successful
+  decode allocates neither a path segment nor a frame string; the benchmark in §7
+  shows no measurable difference from the annotation-free build.
+* `mapError` keeps the path and the frames when every part shared them — that is how
+  `unboundedMap`'s `missed input:` rewrite and a `mapResult` wording rewrite stay
+  located. When the parts disagree, both are dropped rather than guessed at.
 * `promotePartial`, `resultOrPartial` and `getOrThrow` hand the located form to
   their `onError` callback — that is what those callbacks are for.
 * Prefer different wording (e.g. `expected string, got number`)? Rewrite the leaf
   codec with `Codec::mapResult` + `DataResult::mapError` and the location survives;
   see `ErrorPathTest.WordingCanBeRewrittenWhileKeepingTheLocation`.
-* Paths are an **addition** — DFU has none. `test/unit/error_path_test.cpp` covers
-  the format, nested lists, multi-part failures, missing keys, unbounded maps,
-  dispatch payloads and the encode side.
+* Paths and frames are an **addition** — DFU has neither.
+  `test/unit/error_path_test.cpp` covers the format, nested lists, multi-part
+  failures, missing keys, unbounded maps, dispatch payloads, the encode side
+  (`FrameTest` for the chains, `ErrorPathTest` for the locations).
 
 **Strict optional fields.** Paths only help if the error is not swallowed, and DFU's
 `OptionalFieldCodec` deliberately swallows a present-but-invalid optional value. For
@@ -383,16 +412,16 @@ Intentional deviations and additions, all documented in the headers:
 | `Codec.optionalFieldOf(name, Lifecycle, …)` | 4-argument overload | not ported | rarely used; `.stable()` covers it |
 | `codec::recursive<A>(supplier)` *(addition)* | — (Java expresses recursion through the datafixer graphs) | provided | resolves the supplier on first use, which also breaks the static-initialisation cycle |
 | `codecs::stringEnum<E>(table, name)` *(addition)* | — (Minecraft uses `StringRepresentable.fromEnum`, which is not in DFU) | provided | name-table enums without boilerplate; implemented with `flatXmap`, so it composes like any other codec |
-| `DataResult::location()` / `describe()` *(addition)* | no locations anywhere | every field/element/map entry attaches its path | messages stay DFU-identical; `describe()` reports `risks[3].condition.or[0].op: Not a string: 1` |
+| `DataResult::location()` / `describe()` / `report()` *(addition)* | no locations anywhere | every field/element/map entry attaches its path, every codec its own name | messages stay DFU-identical; `describe()` reports `risks[3].condition.or[0].op: Not a string: 1`, `report()` adds the codec chain |
 | `optionalFieldStrict` / `optionalFieldOfStrict` *(addition)* | `OptionalFieldCodec` swallows a present-but-invalid value | error-propagating counterpart | a validator must not read a broken value as an absent one |
 
 ## 6. Test layers
 
-163 GoogleTest cases in three independent executables. `ctest` prefixes each case
+168 GoogleTest cases in three independent executables. `ctest` prefixes each case
 with its layer (`unit.*`, `smoke.*`, `perf.*`), so any layer can be selected as a
 group.
 
-**`test/unit/` → `codec_unit_tests` (137 cases)** — component level, exhaustive
+**`test/unit/` → `codec_unit_tests` (142 cases)** — component level, exhaustive
 on edge cases:
 
 | File | Focus |
@@ -406,7 +435,7 @@ on edge cases:
 | `record_codec_test.cpp` | `record<>` in all forms, `fieldOf`/`optionalFieldOf`/`forGetter`, error joining, partial objects, keys, compression |
 | `dispatch_test.cpp` | `KeyDispatchCodec` (`partialDispatch`/`dispatch`/`dispatchMap`), map-codec payload merging, compressed dispatch |
 | `string_and_enum_test.cpp` | the scalar-conversion cookbook: number↔enum, string↔enum (incl. `codecs::stringEnum`), string↔number, number-or-string via `either`, enums in records/lists/optional fields |
-| `error_path_test.cpp` | error locations: the requested `risks[3].condition.or[0].op` form, message wording rewrites, nested lists, multi-part failures, missing keys, unbounded maps, dispatch payloads, the encode side, strict vs lenient optionals |
+| `error_path_test.cpp` | error locations: the requested `risks[3].condition.or[0].op` form, message wording rewrites, nested lists, multi-part failures, missing keys, unbounded maps, dispatch payloads, the encode side, strict vs lenient optionals; `FrameTest` pins the `report()` codec chains (records, lists, optionals, dispatch, plus one block per failed part) |
 | `odr_test.cpp` + `odr_probe.cpp` | header-only guarantee: two TUs including the single header link together, and the inline singletons have one shared address |
 | `header_self_contained_test.cpp` | includes `codec.hpp` before every other header, proving the single header stands alone |
 
@@ -481,6 +510,12 @@ scaled down to 40 risks so the layer stays fast (~3 s); the ratios are unchanged
 > `--gtest_filter=PerfTest.LargeDocument` alone, codec decode measures ~4.8 ms
 > instead of ~7.0 ms. Rerun locally before drawing conclusions; the harness is
 > there for relative comparisons, not for absolute claims.
+>
+> **The annotations are free on the success path.** Paths and codec frames (§3) are
+> materialised only while an error travels outwards, so adding them did not change
+> these numbers: re-measuring the same 5-run medians afterwards moved the large
+> fixture from 7.03 to 6.68 ms (codec decode), 10.43 to 9.62 ms (parse + decode) and
+> 11.24 to 10.77 ms (encode) — all inside the spread quoted above.
 
 ### Conclusion
 
