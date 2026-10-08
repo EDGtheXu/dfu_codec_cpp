@@ -12,6 +12,8 @@ add_executable(codec_unit_tests
   codec_combinators_test.cpp
   record_codec_test.cpp
   dispatch_test.cpp
+  odr_test.cpp
+  odr_probe.cpp          # second TU: guards the header-only property
 )
 
 codec_configure_test(codec_unit_tests)

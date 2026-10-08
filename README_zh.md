@@ -11,8 +11,8 @@
 `reference/dfu-6.0.8/`。这些源码属于 Mojang，仅作阅读参考——不参与构建，也刻意
 不纳入版本管理——脚本的作用是让本次移植的来源可复现。
 
-* 仅头文件库：[`include/codec/`](include/codec)
-* 分层测试：[`test/unit/`](test/unit)（114 个用例）、[`test/smoke/`](test/smoke)
+* 仅头文件库：[`include/codec/`](include/codec)（CMake `INTERFACE` 目标，无需编译任何源文件）
+* 分层测试：[`test/unit/`](test/unit)（117 个用例）、[`test/smoke/`](test/smoke)
   （21 个用例）、[`test/perf/`](test/perf)（3 个用例，codec 与 nlohmann/json 的
   性能对比）——每层一个独立可执行文件
 * 参考用例（风险定义文档）：[`models/risk_def.hpp`](models/risk_def.hpp)
@@ -63,7 +63,7 @@ powershell -File scripts/build.ps1 -RunTests
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 全部测试层，138 个用例
+ctest --test-dir build --output-on-failure   # 全部测试层，141 个用例
 cmake --build build --target check           # 等价的一键目标
 build/examples/risk_def_example.exe          # 可选：示例文档演示
 ```
@@ -95,6 +95,32 @@ Release 下约 3.5 秒、Debug 下约 13 秒；`ctest -R perf -V` 可以打印�
 CMake 选项：`CODEC_BUILD_TESTS`、`CODEC_BUILD_EXAMPLES`、
 `CODEC_WARNINGS_AS_ERRORS`。库目标名为 `codec`（别名 `codec::codec`），链接它并
 `#include "codec/all.hpp"` 即可。
+
+### 仅头文件（header-only）
+
+本库是纯头文件库：`include/codec/` 下是 9 个 `.hpp`，没有任何翻译单元；CMake 目标
+是 `INTERFACE` 库，因此不需要编译、链接、安装，也不存在 ABI 兼容问题——接入成本就是
+一条 `target_link_libraries`：
+
+```cmake
+add_subdirectory(path/to/Codec)                     # 或用 FetchContent_Declare(...)
+target_link_libraries(my_app PRIVATE codec::codec)  # 附带 include/、third_party/ 与 C++17
+```
+
+命名空间作用域下的一切要么是 `inline` 函数、要么是模板、要么是 inline 变量
+（`JsonOps::INSTANCE`、`codecs::Int` 等），因此可以放心地在任意多个翻译单元里包含这些
+头文件，单例也确实是共享的：
+
+* `test/unit/odr_probe.cpp` 是第二个翻译单元，它包含了全部头文件（外加
+  `models/risk_def.hpp`），因此单元测试可执行文件会把所有定义链接两遍——漏写
+  `inline` 会直接在链接期失败；
+* `test/unit/odr_test.cpp` 会比较两个翻译单元里看到的 codec 与 `JsonOps::INSTANCE`
+  地址，从而抓住"某个定义悄悄变成翻译单元内部链接"的情况。把 `codecs::Int` 前的
+  `inline` 改成 `static`，这两个测试都会失败。
+
+唯一的编译期依赖是 [nlohmann/json](#关于-json-值类型)（`third_party/` 下的单头文件，
+也可以换成你自己 include 路径上的副本）；测试额外需要 GoogleTest，而 `INTERFACE`
+目标不会把它传递出去。
 
 ### 关于 JSON 值类型
 
@@ -263,10 +289,10 @@ Codec<Condition> conditionCodec() {
 
 ## 6. 测试分层
 
-138 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
+141 个 GoogleTest 用例分布在三个独立可执行文件中。`ctest` 会为每个用例加上所属层的
 前缀（`unit.*`、`smoke.*`、`perf.*`），因此任何一层都可以按组选择运行。
 
-**`test/unit/` → `codec_unit_tests`（114 个用例）**——组件级，覆盖各种边界情况：
+**`test/unit/` → `codec_unit_tests`（117 个用例）**——组件级，覆盖各种边界情况：
 
 | 文件 | 关注点 |
 | --- | --- |
@@ -278,6 +304,7 @@ Codec<Condition> conditionCodec() {
 | `codec_combinators_test.cpp` | `xmap`/`flatXmap`/`comapFlatMap`/`flatComapMap`、`orElse`、`mapResult`、`either`、`pair`、`listOf`、`unboundedMap`、范围校验、unit codec、map codec 组合子 |
 | `record_codec_test.cpp` | 各种形式的 `record<>`、`fieldOf`/`optionalFieldOf`/`forGetter`、错误合并、部分对象、keys、压缩 |
 | `dispatch_test.cpp` | `KeyDispatchCodec`（`partialDispatch`/`dispatch`/`dispatchMap`）、map codec 载荷合并、压缩 dispatch |
+| `odr_test.cpp` + `odr_probe.cpp` | 仅头文件保证：两个包含全部头文件的翻译单元能一起链接，且 inline 单例在两个 TU 中地址一致 |
 
 **`test/smoke/` → `codec_smoke_tests`（21 个用例）**——小而快的端到端检查，回答
 "这个移植到底能不能用"：

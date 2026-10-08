@@ -14,8 +14,8 @@ The reference implementation was decompiled from
 — not part of the build and deliberately not versioned — and the script exists so
 the port's provenance can be reproduced.
 
-* Header-only library: [`include/codec/`](include/codec)
-* Layered tests: [`test/unit/`](test/unit) (114 cases), [`test/smoke/`](test/smoke) (21 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
+* Header-only library: [`include/codec/`](include/codec) (CMake `INTERFACE` target, no sources to build)
+* Layered tests: [`test/unit/`](test/unit) (117 cases), [`test/smoke/`](test/smoke) (21 cases) and [`test/perf/`](test/perf) (3 cases, codec vs nlohmann/json benchmark) — one executable each
 * Reference use case (the risk-definition document): [`models/risk_def.hpp`](models/risk_def.hpp)
 * Runnable example: [`examples/risk_def_main.cpp`](examples/risk_def_main.cpp)
 
@@ -64,7 +64,7 @@ Or drive CMake directly:
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # all layers, 138 cases
+ctest --test-dir build --output-on-failure   # all layers, 141 cases
 cmake --build build --target check           # same thing, one click/target
 build/examples/risk_def_example.exe          # optional: sample document demo
 ```
@@ -100,6 +100,34 @@ The suite is verified with **MSVC 14.44 (VS2022 / CLion) in Debug** and
 CMake options: `CODEC_BUILD_TESTS`, `CODEC_BUILD_EXAMPLES`,
 `CODEC_WARNINGS_AS_ERRORS`. The library target is `codec` (alias `codec::codec`);
 link it and `#include "codec/all.hpp"`.
+
+### Header-only
+
+The library is header-only: `include/codec/` contains nine `.hpp` files and no
+translation units, and the CMake target is an `INTERFACE` library, so there is
+nothing to compile, link, install or keep ABI-compatible — consuming it costs one
+`target_link_libraries`:
+
+```cmake
+add_subdirectory(path/to/Codec)                     # or FetchContent_Declare(...)
+target_link_libraries(my_app PRIVATE codec::codec)  # adds include/ + third_party/ + C++17
+```
+
+Everything at namespace scope is `inline` (functions), a template, or an inline
+variable (`JsonOps::INSTANCE`, `codecs::Int`, ...), so including the headers from
+any number of translation units is safe, and the singletons really are shared:
+
+* `test/unit/odr_probe.cpp` is a second TU that includes every header (plus
+  `models/risk_def.hpp`), so the unit test binary links all definitions twice —
+  a missing `inline` fails the build at link time;
+* `test/unit/odr_test.cpp` compares the addresses of the codecs and of
+  `JsonOps::INSTANCE` across the two TUs, which catches a definition that
+  silently became translation-unit-local. Swap `inline` for `static` on
+  `codecs::Int` and both tests fail.
+
+The only compile-time dependency is [nlohmann/json](#the-json-value-type) (a
+single header in `third_party/`, or your own copy on the include path); the tests
+additionally need GoogleTest, which the `INTERFACE` target does not propagate.
 
 ### The JSON value type
 
@@ -278,11 +306,11 @@ Intentional deviations, all documented in the headers:
 
 ## 6. Test layers
 
-138 GoogleTest cases in three independent executables. `ctest` prefixes each case
+141 GoogleTest cases in three independent executables. `ctest` prefixes each case
 with its layer (`unit.*`, `smoke.*`, `perf.*`), so any layer can be selected as a
 group.
 
-**`test/unit/` → `codec_unit_tests` (114 cases)** — component level, exhaustive
+**`test/unit/` → `codec_unit_tests` (117 cases)** — component level, exhaustive
 on edge cases:
 
 | File | Focus |
@@ -295,6 +323,7 @@ on edge cases:
 | `codec_combinators_test.cpp` | `xmap`/`flatXmap`/`comapFlatMap`/`flatComapMap`, `orElse`, `mapResult`, `either`, `pair`, `listOf`, `unboundedMap`, ranges, unit codecs, map-codec combinators |
 | `record_codec_test.cpp` | `record<>` in all forms, `fieldOf`/`optionalFieldOf`/`forGetter`, error joining, partial objects, keys, compression |
 | `dispatch_test.cpp` | `KeyDispatchCodec` (`partialDispatch`/`dispatch`/`dispatchMap`), map-codec payload merging, compressed dispatch |
+| `odr_test.cpp` + `odr_probe.cpp` | header-only guarantee: two TUs including every header link together, and the inline singletons have one shared address |
 
 **`test/smoke/` → `codec_smoke_tests` (21 cases)** — small and fast end-to-end
 passes that answer "does the port work at all?":
